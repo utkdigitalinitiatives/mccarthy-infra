@@ -1,0 +1,47 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# This repository is public - never commit the populated file.
+
+project_name    = "mccarthy"
+storage_prefix  = "mcc"
+subscription_id = "REPLACE_WITH_SUBSCRIPTION_ID"
+location        = "eastus2"
+cost_center     = "REPLACE_WITH_COST_CENTER"
+
+tfstate_resource_group_name  = "mccarthy-tfstate-rg"
+tfstate_storage_account_name = "REPLACE_WITH_STATE_STORAGE_ACCOUNT"
+
+# Local applies authenticate with the Azure CLI, not a GitHub OIDC token.
+use_oidc = false
+
+# --- Image ---------------------------------------------------------------------
+# The gallery and the base image are owned by lib-main-infra and shared. Only
+# image_name below belongs to this project.
+use_gallery_image           = true
+gallery_name                = "lib_main_gallery"
+gallery_resource_group_name = "lib-main-images-rg"
+image_name                  = "mccarthy-rocky-linux-9"
+
+# WARNING: this value is a footgun for manual applies. Always pass
+# -var="image_version=<currently running version>" on the command line; CI
+# overrides it explicitly, but a stale value here will reimage production.
+image_version = "0.0.1"
+
+# --- Site ----------------------------------------------------------------------
+# Generate once with `uuidgen | tr 'A-Z' 'a-z'` and keep it forever. Must match
+# config/system.site.yml in the app repo or config import fails on every deploy.
+drupal_site_uuid = "REPLACE_WITH_UUID"
+
+domain_name  = "REPLACE_WITH_FQDN" # e.g. mccarthy.lib.utk.edu
+enable_https = true
+
+# Resource ID of an externally-managed public IP for the load balancer.
+# Leave null to have Terraform create one and use lb_dns_label instead.
+public_ip_id = null
+lb_dns_label = "mccarthy"
+
+# --- Access --------------------------------------------------------------------
+admin_ssh_public_key = "REPLACE_WITH_SSH_PUBLIC_KEY"
+
+# Two-pass deployment: leave false for the very first apply (the VMSS does not
+# exist yet, so there is no principal to grant), then set true and re-apply.
+enable_vmss_blob_access = false

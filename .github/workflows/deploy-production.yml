@@ -1,0 +1,157 @@
+name: Deploy to Production
+
+# Manual production deploy. Use for rollback or emergency: pass the exact image
+# version you want live. The normal path is deploy-on-main-merge.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_version:
+        description: 'Image version to deploy (e.g. 0.0.42)'
+        required: true
+        type: string
+
+# Shares a concurrency group with deploy-on-main-merge.yml so a manual rollback
+# and an automatic deploy can never apply against production at the same time.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ARM_USE_OIDC: true
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+
+  TF_VAR_project_name: ${{ vars.PROJECT_NAME }}
+  TF_VAR_storage_prefix: ${{ vars.STORAGE_PREFIX }}
+  TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_location: ${{ vars.LOCATION }}
+  TF_VAR_cost_center: ${{ vars.COST_CENTER }}
+  TF_VAR_tfstate_resource_group_name: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+  TF_VAR_tfstate_storage_account_name: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+  TF_VAR_use_gallery_image: "true"
+  TF_VAR_gallery_name: ${{ vars.GALLERY_NAME }}
+  TF_VAR_gallery_resource_group_name: ${{ vars.GALLERY_RESOURCE_GROUP }}
+  TF_VAR_image_name: ${{ vars.APP_IMAGE_NAME }}
+  TF_VAR_lb_dns_label: ${{ vars.LB_DNS_LABEL }}
+  TF_VAR_admin_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+  TF_VAR_enable_vmss_blob_access: "true"
+  TF_VAR_drupal_site_uuid: ${{ vars.DRUPAL_SITE_UUID }}
+  TF_VAR_enable_https: "true"
+  TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+  TF_VAR_public_ip_id: ${{ vars.PUBLIC_IP_ID }}
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Azure Login
+        uses: azure/login@v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: environments/production
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=production/terraform.tfstate" \
+            -backend-config="use_oidc=true" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Terraform Plan
+        working-directory: environments/production
+        run: |
+          terraform plan \
+            -var="image_version=${{ inputs.image_version }}" \
+            -out=tfplan
+
+      - name: Terraform Apply (Rolling Update)
+        working-directory: environments/production
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get VMSS Details
+        id: vmss
+        working-directory: environments/production
+        run: |
+          {
+            echo "vmss_name=$(terraform output -raw vmss_name)"
+            echo "vmss_id=$(terraform output -raw vmss_id)"
+            echo "resource_group_name=$(terraform output -raw resource_group_name)"
+            echo "application_url=$(terraform output -raw application_url)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Monitor Rolling Update
+        run: |
+          echo "Monitoring rolling update for VMSS: ${{ steps.vmss.outputs.vmss_name }}"
+
+          for i in {1..60}; do
+            STATUS=$(az vmss get-instance-view \
+              --name "${{ steps.vmss.outputs.vmss_name }}" \
+              --resource-group "${{ steps.vmss.outputs.resource_group_name }}" \
+              --query "statuses[?code=='ProvisioningState/succeeded'].code" \
+              -o tsv 2>/dev/null || echo "pending")
+
+            if [ "$STATUS" == "ProvisioningState/succeeded" ]; then
+              echo "Rolling update completed successfully!"
+              break
+            fi
+
+            echo "Update in progress... (check $i/60)"
+            sleep 30
+          done
+
+      - name: Health Check
+        run: |
+          # The health endpoint is exempt from the HTTPS redirect.
+          if [ -n "${{ vars.DOMAIN_NAME }}" ]; then
+            HEALTH_URL="http://${{ vars.DOMAIN_NAME }}/health"
+          else
+            HEALTH_URL="${{ steps.vmss.outputs.application_url }}/health"
+          fi
+
+          echo "Running health check against $HEALTH_URL"
+          for i in {1..10}; do
+            if curl -sf "$HEALTH_URL" > /dev/null; then
+              echo "Health check passed!"
+              exit 0
+            fi
+            echo "Waiting for healthy response... (attempt $i/10)"
+            sleep 30
+          done
+
+          echo "::error::Health check did not pass within timeout"
+          exit 1
+
+      - name: Deployment Summary
+        if: always() && steps.vmss.outputs.application_url != ''
+        run: |
+          {
+            echo "## Production Deployment Complete"
+            echo ""
+            echo "**Image Version:** ${{ inputs.image_version }}"
+            echo "**VMSS:** ${{ steps.vmss.outputs.vmss_name }}"
+            echo "**Application URL:** ${{ steps.vmss.outputs.application_url }}"
+            echo ""
+            echo "Rolling update completed. Verify the application at the URL above."
+          } >> "$GITHUB_STEP_SUMMARY"

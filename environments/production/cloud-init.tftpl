@@ -1,0 +1,558 @@
+#cloud-config
+# Cloud-init configuration for Drupal VMSS instances
+# This configures database, storage, and runs Drupal site installation
+
+write_files:
+  # Drupal environment configuration (PHP)
+  - path: /etc/drupal/environment.php
+    permissions: '0640'
+    owner: root:drupal
+    content: |
+      <?php
+      /**
+       * Drupal environment configuration.
+       * Populated by cloud-init at boot time.
+       */
+
+      // Database configuration
+      // Password is substituted at boot by /opt/fetch-secrets.sh (Key Vault).
+      $databases['default']['default'] = [
+        'database' => '${db_name}',
+        'username' => '${db_user}',
+        'password' => '__DB_PASSWORD__',
+        'host' => '${db_host}',
+        'port' => '5432',
+        'driver' => 'pgsql',
+        'prefix' => '',
+      ];
+
+      // --- TEMPORARY: D10 news migration source (Pantheon MySQL). Remove after migration. ---
+      // Overrides the placeholder $databases['migrate'] declared in settings.php
+      // (see the app repo issue tracker). Values are substituted at boot by
+      // /opt/fetch-secrets.sh IF the 'migrate-pantheon-db' Key Vault secret exists;
+      // if it doesn't, the __MIGRATE_DB_*__ placeholders remain (inert — the connection
+      // is only ever opened by an explicit `drush migrate:*` run).
+      $databases['migrate']['default'] = [
+        'database'  => '__MIGRATE_DB_NAME__',
+        'username'  => '__MIGRATE_DB_USER__',
+        'password'  => '__MIGRATE_DB_PASS__',
+        'host'      => '__MIGRATE_DB_HOST__',
+        'port'      => '__MIGRATE_DB_PORT__',
+        'driver'    => 'mysql',
+        'namespace' => 'Drupal\\Core\\Database\\Driver\\mysql',
+        'prefix'    => '',
+      ];
+
+      // Hash salt for security
+      // Substituted at boot by /opt/fetch-secrets.sh (Key Vault).
+      $settings['hash_salt'] = '__HASH_SALT__';
+
+      // Trusted host patterns
+      $settings['trusted_host_patterns'] = [
+        '^localhost$',
+        '^127\.0\.0\.1$',
+%{ if lb_fqdn != null ~}
+        '^' . preg_quote('${lb_fqdn}', '/') . '$',
+%{ endif ~}
+%{ if domain_name != null ~}
+        '^' . preg_quote('${domain_name}', '/') . '$',
+%{ endif ~}
+      ];
+
+      // Key module: inject storage key into Key entity.
+      // Substituted at boot by /opt/fetch-secrets.sh (Key Vault).
+      $config['key.key.azure_blob_key']['key_provider'] = 'config';
+      $config['key.key.azure_blob_key']['key_provider_settings']['key_value'] = '__STORAGE_KEY__';
+
+      // Azure Blob File System configuration
+      $config['az_blob_fs.settings']['az_blob_account_name'] = '${storage_account}';
+      $config['az_blob_fs.settings']['az_blob_account_key_name'] = 'azure_blob_key';
+      $config['az_blob_fs.settings']['az_blob_container_name'] = '${storage_container}';
+      $config['az_blob_fs.settings']['az_blob_protocol'] = 'https';
+      $config['az_blob_fs.settings']['az_blob_cdn_host_name'] = '${domain_name}';
+
+      // Default file scheme
+      $settings['file_default_scheme'] = 'azblob';
+
+      // Reverse proxy settings for Azure Load Balancer
+      $settings['reverse_proxy'] = TRUE;
+      $settings['reverse_proxy_addresses'] = ['127.0.0.1', '168.63.129.16'];
+      $settings['reverse_proxy_trusted_headers'] =
+        \Symfony\Component\HttpFoundation\Request::HEADER_X_FORWARDED_FOR |
+        \Symfony\Component\HttpFoundation\Request::HEADER_X_FORWARDED_HOST |
+        \Symfony\Component\HttpFoundation\Request::HEADER_X_FORWARDED_PORT |
+        \Symfony\Component\HttpFoundation\Request::HEADER_X_FORWARDED_PROTO;
+
+  # Secrets bootstrap: fetches Key Vault secrets via VMSS managed identity,
+  # substitutes placeholders in environment.php, and writes /etc/drupal/secrets.env
+  # for downstream shell scripts (drush, etc.).
+  - path: /opt/fetch-secrets.sh
+    permissions: '0750'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      KV_NAME="${kv_name}"
+      ENV_NAME="${env_name}"
+      HASH_SALT_SECRET="${hash_salt_secret_name}"
+      STORAGE_KEY_SECRET="${storage_key_secret_name}"
+      ENV_PHP="/etc/drupal/environment.php"
+      SECRETS_ENV="/etc/drupal/secrets.env"
+      LOG_FILE="/var/log/drupal-init.log"
+
+      log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [fetch-secrets] $1" | tee -a "$LOG_FILE"
+      }
+
+      # python3 stderr is silenced: during RBAC propagation the response
+      # lacks the expected key and prints a KeyError traceback that log
+      # scanners flag as an error. Real failures still surface via the
+      # terminal "ERROR: could not fetch required secrets" log below.
+      get_token() {
+        curl -s -H "Metadata: true" \
+          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])" 2>/dev/null
+      }
+
+      fetch_secret() {
+        local name="$1"
+        local token="$2"
+        curl -s -H "Authorization: Bearer $token" \
+          "https://$KV_NAME.vault.azure.net/secrets/$name?api-version=7.4" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])" 2>/dev/null
+      }
+
+      # Retry for ~3 minutes: RBAC role propagation can lag 1-2 minutes after
+      # VMSS boot, especially on first apply when the role assignment itself
+      # is created in parallel with the VMSS instance.
+      DB_PASSWORD=""
+      HASH_SALT=""
+      STORAGE_KEY=""
+      for attempt in $(seq 1 18); do
+        TOKEN=$(get_token || true)
+        if [ -n "$TOKEN" ]; then
+          DB_PASSWORD=$(fetch_secret "$ENV_NAME-db-admin-password" "$TOKEN" || true)
+          HASH_SALT=$(fetch_secret "$HASH_SALT_SECRET" "$TOKEN" || true)
+          STORAGE_KEY=$(fetch_secret "$STORAGE_KEY_SECRET" "$TOKEN" || true)
+          [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && break
+        fi
+        log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
+        sleep 10
+      done
+
+      if [ -z "$DB_PASSWORD" ] || [ -z "$HASH_SALT" ] || [ -z "$STORAGE_KEY" ]; then
+        log "ERROR: could not fetch required secrets from $KV_NAME"
+        exit 1
+      fi
+
+      # Substitute placeholders in environment.php. Use python rather than sed
+      # so '/' '&' '|' in values don't need escaping.
+      DB_PASSWORD="$DB_PASSWORD" HASH_SALT="$HASH_SALT" STORAGE_KEY="$STORAGE_KEY" \
+        python3 - "$ENV_PHP" <<'PYEOF'
+      import os, sys
+      path = sys.argv[1]
+      with open(path) as f:
+          content = f.read()
+      content = content.replace('__DB_PASSWORD__', os.environ['DB_PASSWORD'])
+      content = content.replace('__HASH_SALT__', os.environ['HASH_SALT'])
+      content = content.replace('__STORAGE_KEY__', os.environ['STORAGE_KEY'])
+      with open(path, 'w') as f:
+          f.write(content)
+      PYEOF
+
+      umask 077
+      cat > "$SECRETS_ENV" <<EOF
+      DB_PASSWORD=$DB_PASSWORD
+      EOF
+      chmod 640 "$SECRETS_ENV"
+      chown root:drupal "$SECRETS_ENV"
+
+      # --- TEMPORARY: Pantheon migration source creds (OPTIONAL — must never block boot) ---
+      # Only substitutes if the 'migrate-pantheon-db' secret exists in KV. A missing or
+      # failed fetch is NOT an error here. Secret value is JSON:
+      #   {"database":..,"username":..,"password":..,"host":..,"port":..}
+      MIGRATE_TOKEN=$(get_token || true)
+      MIGRATE_JSON=""
+      if [ -n "$MIGRATE_TOKEN" ]; then
+        MIGRATE_JSON=$(fetch_secret "migrate-pantheon-db" "$MIGRATE_TOKEN" || true)
+      fi
+      if [ -n "$MIGRATE_JSON" ]; then
+        # Wrapped in if/then so a malformed secret logs a warning instead of
+        # aborting the VMSS boot under `set -e` (prod boot must never be blocked
+        # by this optional migration wiring).
+        if MIGRATE_JSON="$MIGRATE_JSON" python3 - "$ENV_PHP" 2>/dev/null <<'PYEOF'
+      import os, sys, json
+      path = sys.argv[1]
+      creds = json.loads(os.environ['MIGRATE_JSON'])
+      with open(path) as f:
+          content = f.read()
+      for token, field in [('NAME', 'database'), ('USER', 'username'), ('PASS', 'password'), ('HOST', 'host'), ('PORT', 'port')]:
+          content = content.replace('__MIGRATE_DB_' + token + '__', str(creds[field]))
+      with open(path, 'w') as f:
+          f.write(content)
+      PYEOF
+        then
+          log "Migrate (Pantheon) source DB credentials injected"
+        else
+          log "WARNING: migrate-pantheon-db present but could not be applied (malformed JSON?); continuing boot"
+        fi
+      else
+        log "No migrate-pantheon-db secret; migration source not configured (normal outside migration)"
+      fi
+
+      log "Secrets bootstrap complete"
+
+  # Drupal installation script
+  - path: /opt/drupal-init.sh
+    permissions: '0750'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -e
+
+      # Sourced from /opt/fetch-secrets.sh (Key Vault MI).
+      # shellcheck disable=SC1091
+      source /etc/drupal/secrets.env
+
+      DRUPAL_ROOT="/var/www/drupal"
+      DRUSH="$DRUPAL_ROOT/vendor/bin/drush"
+      LOG_FILE="/var/log/drupal-init.log"
+      LOCK_FILE="/var/run/drupal-init.lock"
+
+      # Prevent concurrent runs
+      exec 200>"$LOCK_FILE"
+      flock -n 200 || { echo "Another instance is running"; exit 0; }
+
+      log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+      }
+
+      log "Starting Drupal initialization..."
+
+      # Fixed site UUID for config sync (set via Terraform)
+      SITE_UUID="${drupal_site_uuid}"
+      CONFIG_SYNC_DIR="$DRUPAL_ROOT/config"
+
+      # Check if Drupal is already installed
+      cd "$DRUPAL_ROOT"
+      if sudo -u drupal $DRUSH status --field=bootstrap 2>/dev/null | grep -q "Successful"; then
+        log "Drupal already installed, running updates..."
+        sudo -u drupal $DRUSH updatedb -y 2>&1 | tee -a "$LOG_FILE" || true
+
+        # Clean up orphaned s3fs module references (s3fs → az_blob_fs migration).
+        # If the DB was synced from an environment where s3fs was still enabled,
+        # drush config:import would fail trying to uninstall a module whose code
+        # has already been removed from the codebase. Force-remove the references
+        # directly in the active config store so config:import can proceed. This
+        # block is idempotent: once the upstream DB no longer has s3fs, it is a
+        # no-op and can eventually be deleted.
+        log "Cleaning up orphaned s3fs module references (if any)..."
+        sudo -u drupal $DRUSH php:eval '
+          $editable = \Drupal::configFactory()->getEditable("core.extension");
+          $modules = $editable->get("module") ?: [];
+          if (isset($modules["s3fs"])) {
+            unset($modules["s3fs"]);
+            $editable->set("module", $modules)->save();
+            echo "Removed s3fs from core.extension active config\n";
+          }
+          \Drupal::keyValue("system.schema")->delete("s3fs");
+          foreach (\Drupal::configFactory()->listAll("s3fs.") as $name) {
+            \Drupal::configFactory()->getEditable($name)->delete();
+            echo "Deleted $name\n";
+          }
+        ' 2>&1 | tee -a "$LOG_FILE" || true
+        sudo -u drupal $DRUSH cache:rebuild 2>&1 | tee -a "$LOG_FILE" || true
+
+        # Import config if config directory has files
+        if [ -f "$CONFIG_SYNC_DIR/system.site.yml" ]; then
+          log "Config sync directory has config, importing..."
+          sudo -u drupal $DRUSH config:import -y 2>&1 | tee -a "$LOG_FILE" || {
+            log "Config import failed (may be no changes), continuing..."
+          }
+        else
+          log "No config in sync directory, skipping import"
+        fi
+
+        sudo -u drupal $DRUSH cache:rebuild 2>&1 | tee -a "$LOG_FILE" || true
+        log "Updates complete"
+      else
+        log "Installing Drupal..."
+        sudo -u drupal $DRUSH site:install standard \
+          --db-url="pgsql://${db_user}:$DB_PASSWORD@${db_host}:5432/${db_name}" \
+          --site-name="${site_name}" \
+          --account-name=admin \
+          --account-pass="${drupal_admin_password}" \
+          --account-mail="admin@example.com" \
+          -y 2>&1 | tee -a "$LOG_FILE"
+
+        # Set fixed site UUID for config sync compatibility
+        log "Setting site UUID to $SITE_UUID..."
+        sudo -u drupal $DRUSH config:set system.site uuid "$SITE_UUID" -y 2>&1 | tee -a "$LOG_FILE"
+
+        log "Enabling Azure Blob FS module..."
+        sudo -u drupal $DRUSH en key az_blob_fs -y 2>&1 | tee -a "$LOG_FILE" || true
+
+        log "Rebuilding cache..."
+        sudo -u drupal $DRUSH cache:rebuild 2>&1 | tee -a "$LOG_FILE"
+
+        log "Drupal installation complete"
+      fi
+
+      log "Drupal initialization finished"
+
+%{ if enable_https && domain_name != null ~}
+  # TLS setup script (Let's Encrypt with blob-backed cert persistence)
+  - path: /opt/tls-setup.sh
+    permissions: '0750'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -e
+
+      DOMAIN="${domain_name}"
+      STORAGE_ACCOUNT="${storage_account}"
+      CERT_CONTAINER="tls-certs"
+      CERT_DIR="/etc/pki/tls"
+      CERT_FILE="$CERT_DIR/certs/letsencrypt-fullchain.pem"
+      KEY_FILE="$CERT_DIR/private/letsencrypt-privkey.pem"
+      LOG_FILE="/var/log/drupal-init.log"
+
+      log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [tls-setup] $1" | tee -a "$LOG_FILE"
+      }
+
+      log "Starting TLS setup for $DOMAIN..."
+
+      # Get Azure managed identity token via IMDS
+      get_token() {
+        curl -s -H "Metadata: true" \
+          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://storage.azure.com/" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])"
+      }
+
+      # Download blob from Azure Storage
+      download_blob() {
+        local blob_path="$1"
+        local dest="$2"
+        local token
+        token=$(get_token)
+        local http_code
+        http_code=$(curl -s -o "$dest" -w "%%{http_code}" \
+          -H "Authorization: Bearer $token" \
+          -H "x-ms-version: 2020-10-02" \
+          "https://$STORAGE_ACCOUNT.blob.core.windows.net/$CERT_CONTAINER/$blob_path")
+        [ "$http_code" = "200" ]
+      }
+
+      # Upload blob to Azure Storage
+      upload_blob() {
+        local src="$1"
+        local blob_path="$2"
+        local token
+        token=$(get_token)
+        curl -s -X PUT \
+          -H "Authorization: Bearer $token" \
+          -H "x-ms-version: 2020-10-02" \
+          -H "x-ms-blob-type: BlockBlob" \
+          -H "Content-Type: application/x-pem-file" \
+          --data-binary "@$src" \
+          "https://$STORAGE_ACCOUNT.blob.core.windows.net/$CERT_CONTAINER/$blob_path"
+      }
+
+      CERT_VALID=false
+
+      # Try to download existing cert from blob storage
+      log "Checking for existing certificate in blob storage..."
+      if download_blob "$DOMAIN/fullchain.pem" "$CERT_FILE" && \
+         download_blob "$DOMAIN/privkey.pem" "$KEY_FILE"; then
+        chmod 644 "$CERT_FILE"
+        chmod 600 "$KEY_FILE"
+        # Validate cert is not expired/expiring within 7 days
+        if openssl x509 -checkend 604800 -noout -in "$CERT_FILE" 2>/dev/null; then
+          log "Valid certificate found in blob storage"
+          CERT_VALID=true
+        else
+          log "Certificate from blob storage is expired or expiring soon"
+        fi
+      else
+        log "No certificate found in blob storage"
+      fi
+
+      # Issue new cert with certbot if needed
+      if [ "$CERT_VALID" = false ]; then
+        log "Installing certbot..."
+        dnf install -y certbot 2>&1 | tail -1 | tee -a "$LOG_FILE"
+
+        log "Requesting certificate from Let's Encrypt..."
+        certbot certonly --webroot \
+          -w /var/www/drupal/web \
+          -d "$DOMAIN" \
+          --register-unsafely-without-email \
+          --agree-tos \
+          --non-interactive 2>&1 | tee -a "$LOG_FILE"
+
+        # Copy certbot certs to standard location
+        cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_FILE"
+        cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$KEY_FILE"
+        chmod 644 "$CERT_FILE"
+        chmod 600 "$KEY_FILE"
+
+        # Upload to blob storage for other instances
+        log "Uploading certificate to blob storage..."
+        upload_blob "$CERT_FILE" "$DOMAIN/fullchain.pem"
+        upload_blob "$KEY_FILE" "$DOMAIN/privkey.pem"
+        log "Certificate uploaded to blob storage"
+
+        CERT_VALID=true
+      fi
+
+      if [ "$CERT_VALID" = true ]; then
+        # Write Apache HTTPS vhost
+        cat > /etc/httpd/conf.d/ssl-letsencrypt.conf <<SSLEOF
+      Listen 443 https
+      <VirtualHost *:443>
+          SSLEngine on
+          SSLCertificateFile $CERT_FILE
+          SSLCertificateKeyFile $KEY_FILE
+
+          SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1
+          SSLCipherSuite ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+          SSLHonorCipherOrder off
+
+          DocumentRoot /var/www/drupal/web
+
+          <Directory /var/www/drupal/web>
+              Options -Indexes +FollowSymLinks
+              AllowOverride All
+              Require all granted
+              RewriteEngine On
+              RewriteBase /
+              RewriteCond %%{REQUEST_FILENAME} !-f
+              RewriteCond %%{REQUEST_FILENAME} !-d
+              RewriteRule ^ index.php [L]
+          </Directory>
+
+          <FilesMatch \.php$>
+              SetHandler "proxy:unix:/run/php-fpm/drupal.sock|fcgi://localhost"
+          </FilesMatch>
+
+          <Location /health>
+              SetHandler none
+              Require all granted
+          </Location>
+
+          # Reverse proxy for Azure Blob Storage files (private container, SAS auth)
+          SSLProxyEngine On
+          RewriteEngine On
+          RewriteCond %%{REQUEST_URI} ^/drupal-media/
+          RewriteRule ^/drupal-media/(.*)$ https://${storage_account}.blob.core.windows.net/drupal-media/\$1${storage_sas_token} [P,L,NE,E=proxy-nocanon:1]
+
+          Header always set X-Frame-Options "SAMEORIGIN"
+          Header always set X-Content-Type-Options "nosniff"
+          Header always set X-XSS-Protection "1; mode=block"
+          Header always set Strict-Transport-Security "max-age=300"
+
+          ErrorLog /var/log/httpd/drupal-ssl-error.log
+          CustomLog /var/log/httpd/drupal-ssl-access.log combined
+          ProxyTimeout 300
+      </VirtualHost>
+      SSLEOF
+
+        # Replace HTTP vhost with redirect (exempt /health and ACME challenge)
+        cat > /etc/httpd/conf.d/drupal.conf <<HTTPEOF
+      <VirtualHost *:80>
+          RewriteEngine On
+          RewriteCond %%{REQUEST_URI} !^/health
+          RewriteCond %%{REQUEST_URI} !^/\.well-known/acme-challenge/
+          RewriteRule ^(.*)$ https://%%{HTTP_HOST}\$1 [R=301,L]
+
+          <Location /health>
+              SetHandler none
+              Require all granted
+          </Location>
+
+          # Allow ACME challenges for cert renewal
+          DocumentRoot /var/www/drupal/web
+          <Directory /var/www/drupal/web/.well-known>
+              Require all granted
+          </Directory>
+      </VirtualHost>
+      HTTPEOF
+
+        log "Apache HTTPS configuration written"
+
+        # Set up cert renewal
+        if [ -d "/etc/letsencrypt/live/$DOMAIN" ]; then
+          # Certbot issued the cert — use certbot renewal
+          cat > /etc/letsencrypt/renewal-hooks/deploy/01-update-and-upload.sh <<'RENEWEOF'
+      #!/bin/bash
+      DOMAIN="$RENEWED_DOMAINS"
+      cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" /etc/pki/tls/certs/letsencrypt-fullchain.pem
+      cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" /etc/pki/tls/private/letsencrypt-privkey.pem
+      chmod 644 /etc/pki/tls/certs/letsencrypt-fullchain.pem
+      chmod 600 /etc/pki/tls/private/letsencrypt-privkey.pem
+      systemctl restart httpd
+      # Re-upload to blob storage
+      /opt/tls-upload-cert.sh
+      RENEWEOF
+          chmod 750 /etc/letsencrypt/renewal-hooks/deploy/01-update-and-upload.sh
+
+          # Upload helper script
+          cat > /opt/tls-upload-cert.sh <<UPLOADEOF
+      #!/bin/bash
+      TOKEN=\$(curl -s -H "Metadata: true" \
+        "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://storage.azure.com/" \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+      for FILE in fullchain.pem privkey.pem; do
+        SRC="/etc/pki/tls/\$([ \$FILE = fullchain.pem ] && echo certs || echo private)/letsencrypt-\$FILE"
+        curl -s -X PUT \
+          -H "Authorization: Bearer \$TOKEN" \
+          -H "x-ms-version: 2020-10-02" \
+          -H "x-ms-blob-type: BlockBlob" \
+          -H "Content-Type: application/x-pem-file" \
+          --data-binary "@\$SRC" \
+          "https://${storage_account}.blob.core.windows.net/tls-certs/${domain_name}/\$FILE"
+      done
+      UPLOADEOF
+          chmod 750 /opt/tls-upload-cert.sh
+
+          systemctl enable certbot-renew.timer
+          systemctl start certbot-renew.timer
+          log "Certbot renewal timer enabled"
+        else
+          # Cert came from blob — set up daily cron to check expiry and re-fetch
+          cat > /etc/cron.daily/tls-check <<CRONEOF
+      #!/bin/bash
+      if ! openssl x509 -checkend 604800 -noout -in /etc/pki/tls/certs/letsencrypt-fullchain.pem 2>/dev/null; then
+        /opt/tls-setup.sh
+      fi
+      CRONEOF
+          chmod 750 /etc/cron.daily/tls-check
+          log "Daily cert expiry check cron installed"
+        fi
+      fi
+
+      log "TLS setup complete"
+%{ endif ~}
+
+runcmd:
+  # Ensure directories have correct ownership
+  - chown root:drupal /etc/drupal
+  - chmod 750 /etc/drupal
+  - chown root:drupal /etc/drupal/environment.php
+
+  # Fetch secrets from Key Vault (must run before drupal-init.sh)
+  - /opt/fetch-secrets.sh
+
+  # Run Drupal initialization
+  - /opt/drupal-init.sh
+
+%{ if enable_https && domain_name != null ~}
+  # Configure TLS (Let's Encrypt)
+  - /opt/tls-setup.sh
+%{ endif ~}
+
+  # Restart web services
+  - systemctl restart php-fpm
+  - systemctl restart httpd

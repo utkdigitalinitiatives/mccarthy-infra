@@ -1,0 +1,319 @@
+#cloud-config
+# Cloud-init configuration for Drupal dev VMs
+# This configures database, storage, and initializes Drupal from synced DB
+
+write_files:
+  # Drupal environment configuration (PHP)
+  - path: /etc/drupal/environment.php
+    permissions: '0640'
+    owner: root:drupal
+    content: |
+      <?php
+      /**
+       * Drupal environment configuration.
+       * Populated by cloud-init at boot time.
+       */
+
+      // Database configuration
+      // Password is substituted at boot by /opt/fetch-secrets.sh (Key Vault).
+      $databases['default']['default'] = [
+        'database' => '${db_name}',
+        'username' => '${db_user}',
+        'password' => '__DB_PASSWORD__',
+        'host' => '${db_host}',
+        'port' => '5432',
+        'driver' => 'pgsql',
+        'prefix' => '',
+      ];
+
+      // --- TEMPORARY: D10 news migration source (Pantheon MySQL). Remove after migration. ---
+      // Overrides the placeholder $databases['migrate'] declared in settings.php
+      // (see the app repo issue tracker). Values are substituted at boot by
+      // /opt/fetch-secrets.sh IF the 'migrate-pantheon-db' Key Vault secret exists;
+      // if it doesn't, the __MIGRATE_DB_*__ placeholders remain (inert — the connection
+      // is only ever opened by an explicit `drush migrate:*` run).
+      $databases['migrate']['default'] = [
+        'database'  => '__MIGRATE_DB_NAME__',
+        'username'  => '__MIGRATE_DB_USER__',
+        'password'  => '__MIGRATE_DB_PASS__',
+        'host'      => '__MIGRATE_DB_HOST__',
+        'port'      => '__MIGRATE_DB_PORT__',
+        'driver'    => 'mysql',
+        'namespace' => 'Drupal\\Core\\Database\\Driver\\mysql',
+        'prefix'    => '',
+      ];
+
+      // Hash salt for security
+      // Substituted at boot by /opt/fetch-secrets.sh (Key Vault).
+      $settings['hash_salt'] = '__HASH_SALT__';
+
+      // Trusted host patterns (allow IP access for dev/test)
+      $settings['trusted_host_patterns'] = [
+        '^localhost$',
+        '^127\.0\.0\.1$',
+        '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$',
+      ];
+
+      // Key module: inject storage key into Key entity.
+      // Substituted at boot by /opt/fetch-secrets.sh (Key Vault).
+      $config['key.key.azure_blob_key']['key_provider'] = 'config';
+      $config['key.key.azure_blob_key']['key_provider_settings']['key_value'] = '__STORAGE_KEY__';
+
+      // Azure Blob File System configuration
+      $config['az_blob_fs.settings']['az_blob_account_name'] = '${storage_account}';
+      $config['az_blob_fs.settings']['az_blob_account_key_name'] = 'azure_blob_key';
+      $config['az_blob_fs.settings']['az_blob_container_name'] = 'drupal-media';
+      $config['az_blob_fs.settings']['az_blob_protocol'] = 'https';
+      $az_blob_host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
+      $config['az_blob_fs.settings']['az_blob_cdn_host_name'] = $az_blob_host;
+
+      // Default file scheme
+      $settings['file_default_scheme'] = 'azblob';
+
+  # Secrets bootstrap: fetches Key Vault secrets via VM managed identity
+  # and substitutes placeholders in environment.php.
+  - path: /opt/fetch-secrets.sh
+    permissions: '0750'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      KV_NAME="${kv_name}"
+      ENV_NAME="${env_name}"
+      HASH_SALT_SECRET="${hash_salt_secret_name}"
+      STORAGE_KEY_SECRET="${storage_key_secret_name}"
+      ENV_PHP="/etc/drupal/environment.php"
+      LOG_FILE="/var/log/cloud-init-output.log"
+
+      log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [fetch-secrets] $1" | tee -a "$LOG_FILE"
+      }
+
+      # python3 stderr is silenced: during RBAC propagation the response
+      # lacks the expected key and prints a KeyError traceback that the
+      # workflow's log scanner flags. Real failures still surface via the
+      # terminal "ERROR: could not fetch required secrets" log below.
+      get_token() {
+        curl -s -H "Metadata: true" \
+          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])" 2>/dev/null
+      }
+
+      fetch_secret() {
+        local name="$1"
+        local token="$2"
+        curl -s -H "Authorization: Bearer $token" \
+          "https://$KV_NAME.vault.azure.net/secrets/$name?api-version=7.4" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])" 2>/dev/null
+      }
+
+      # Retry for ~3 minutes: the dev VM is recreated each merge, so the KV
+      # role assignment is fresh on every boot and RBAC propagation can lag
+      # 1-2 minutes behind cloud-init's first fetch.
+      DB_PASSWORD=""
+      HASH_SALT=""
+      STORAGE_KEY=""
+      for attempt in $(seq 1 18); do
+        TOKEN=$(get_token || true)
+        if [ -n "$TOKEN" ]; then
+          DB_PASSWORD=$(fetch_secret "$ENV_NAME-db-admin-password" "$TOKEN" || true)
+          HASH_SALT=$(fetch_secret "$HASH_SALT_SECRET" "$TOKEN" || true)
+          STORAGE_KEY=$(fetch_secret "$STORAGE_KEY_SECRET" "$TOKEN" || true)
+          [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && break
+        fi
+        log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
+        sleep 10
+      done
+
+      if [ -z "$DB_PASSWORD" ] || [ -z "$HASH_SALT" ] || [ -z "$STORAGE_KEY" ]; then
+        log "ERROR: could not fetch required secrets from $KV_NAME"
+        exit 1
+      fi
+
+      DB_PASSWORD="$DB_PASSWORD" HASH_SALT="$HASH_SALT" STORAGE_KEY="$STORAGE_KEY" \
+        python3 - "$ENV_PHP" <<'PYEOF'
+      import os, sys
+      path = sys.argv[1]
+      with open(path) as f:
+          content = f.read()
+      content = content.replace('__DB_PASSWORD__', os.environ['DB_PASSWORD'])
+      content = content.replace('__HASH_SALT__', os.environ['HASH_SALT'])
+      content = content.replace('__STORAGE_KEY__', os.environ['STORAGE_KEY'])
+      with open(path, 'w') as f:
+          f.write(content)
+      PYEOF
+
+      # --- TEMPORARY: Pantheon migration source creds (OPTIONAL — must never block boot) ---
+      # Only substitutes if the 'migrate-pantheon-db' secret exists in KV. A missing or
+      # failed fetch is NOT an error here. Secret value is JSON:
+      #   {"database":..,"username":..,"password":..,"host":..,"port":..}
+      MIGRATE_TOKEN=$(get_token || true)
+      MIGRATE_JSON=""
+      if [ -n "$MIGRATE_TOKEN" ]; then
+        MIGRATE_JSON=$(fetch_secret "migrate-pantheon-db" "$MIGRATE_TOKEN" || true)
+      fi
+      if [ -n "$MIGRATE_JSON" ]; then
+        MIGRATE_JSON="$MIGRATE_JSON" python3 - "$ENV_PHP" <<'PYEOF'
+      import os, sys, json
+      path = sys.argv[1]
+      creds = json.loads(os.environ['MIGRATE_JSON'])
+      with open(path) as f:
+          content = f.read()
+      for token, field in [('NAME', 'database'), ('USER', 'username'), ('PASS', 'password'), ('HOST', 'host'), ('PORT', 'port')]:
+          content = content.replace('__MIGRATE_DB_' + token + '__', str(creds[field]))
+      with open(path, 'w') as f:
+          f.write(content)
+      PYEOF
+        log "Migrate (Pantheon) source DB credentials injected"
+      else
+        log "No migrate-pantheon-db secret; migration source not configured (normal outside migration)"
+      fi
+
+      log "Secrets bootstrap complete"
+
+runcmd:
+  # Ensure directories have correct ownership
+  - chown root:drupal /etc/drupal
+  - chmod 750 /etc/drupal
+  - chown root:drupal /etc/drupal/environment.php
+
+  # Fetch secrets from Key Vault before any drush command runs
+  - /opt/fetch-secrets.sh
+
+  # Generate self-signed TLS certificate
+  - |
+    openssl req -x509 -nodes -days 30 \
+      -newkey rsa:2048 \
+      -keyout /etc/pki/tls/private/drupal-selfsigned.key \
+      -out /etc/pki/tls/certs/drupal-selfsigned.crt \
+      -subj "/CN=dev-vm/O=/OU=dev"
+    chmod 600 /etc/pki/tls/private/drupal-selfsigned.key
+
+  # Configure Apache HTTPS vhost
+  - |
+    cat > /etc/httpd/conf.d/ssl-selfsigned.conf <<'SSLCONF'
+    Listen 443 https
+    <VirtualHost *:443>
+        SSLEngine on
+        SSLCertificateFile /etc/pki/tls/certs/drupal-selfsigned.crt
+        SSLCertificateKeyFile /etc/pki/tls/private/drupal-selfsigned.key
+
+        DocumentRoot /var/www/drupal/web
+
+        <Directory /var/www/drupal/web>
+            Options -Indexes +FollowSymLinks
+            AllowOverride All
+            Require all granted
+            RewriteEngine On
+            RewriteBase /
+            RewriteCond %%{REQUEST_FILENAME} !-f
+            RewriteCond %%{REQUEST_FILENAME} !-d
+            RewriteRule ^ index.php [L]
+        </Directory>
+
+        <FilesMatch \.php$>
+            SetHandler "proxy:unix:/run/php-fpm/drupal.sock|fcgi://localhost"
+        </FilesMatch>
+
+        <Location /health>
+            SetHandler none
+            Require all granted
+        </Location>
+
+        # Reverse proxy for Azure Blob Storage files (private container, SAS auth)
+        SSLProxyEngine On
+        RewriteEngine On
+        RewriteCond %%{REQUEST_URI} ^/drupal-media/
+        RewriteRule ^/drupal-media/(.*)$ https://${storage_account}.blob.core.windows.net/drupal-media/$1${storage_sas_token} [P,L,NE,E=proxy-nocanon:1]
+
+        Header always set X-Frame-Options "SAMEORIGIN"
+        Header always set X-Content-Type-Options "nosniff"
+        Header always set X-XSS-Protection "1; mode=block"
+        Header always set Strict-Transport-Security "max-age=300"
+
+        ErrorLog /var/log/httpd/drupal-ssl-error.log
+        CustomLog /var/log/httpd/drupal-ssl-access.log combined
+        ProxyTimeout 300
+    </VirtualHost>
+    SSLCONF
+
+  # Replace HTTP vhost with redirect to HTTPS (keep /health for probes)
+  - |
+    cat > /etc/httpd/conf.d/drupal.conf <<'REDIRECTCONF'
+    <VirtualHost *:80>
+        RewriteEngine On
+        RewriteCond %%{REQUEST_URI} !^/health
+        RewriteRule ^(.*)$ https://%%{HTTP_HOST}$1 [R=301,L]
+
+        <Location /health>
+            SetHandler none
+            Require all granted
+        </Location>
+    </VirtualHost>
+    REDIRECTCONF
+
+  # Wait for database connection (sync may have just completed)
+  - |
+    DRUPAL_ROOT="/var/www/drupal"
+    DRUSH="$DRUPAL_ROOT/vendor/bin/drush"
+    cd "$DRUPAL_ROOT"
+    echo "Waiting for database connection..." >> /var/log/cloud-init-output.log
+    for i in $(seq 1 30); do
+      if sudo -u drupal $DRUSH sql:query "SELECT 1" 2>/dev/null; then
+        echo "Database connection established (attempt $i)" >> /var/log/cloud-init-output.log
+        break
+      fi
+      echo "Waiting for database... (attempt $i/30)" >> /var/log/cloud-init-output.log
+      sleep 10
+    done
+
+  # Apply pending database updates, import config, and rebuild caches
+  - |
+    DRUPAL_ROOT="/var/www/drupal"
+    DRUSH="$DRUPAL_ROOT/vendor/bin/drush"
+    CONFIG_SYNC_DIR="$DRUPAL_ROOT/config"
+    cd "$DRUPAL_ROOT"
+    echo "Running database updates..." >> /var/log/cloud-init-output.log
+    sudo -u drupal $DRUSH updatedb -y >> /var/log/cloud-init-output.log 2>&1
+    # Clean up orphaned s3fs module references (s3fs → az_blob_fs migration).
+    # If the DB was synced from an environment where s3fs was still enabled,
+    # drush config:import would fail trying to uninstall a module whose code
+    # has already been removed from the codebase. Force-remove the references
+    # directly in the active config store so config:import can proceed. This
+    # block is idempotent: once the upstream DB no longer has s3fs, it is a
+    # no-op and can eventually be deleted.
+    echo "Cleaning up orphaned s3fs module references (if any)..." >> /var/log/cloud-init-output.log
+    sudo -u drupal $DRUSH php:eval '
+      $editable = \Drupal::configFactory()->getEditable("core.extension");
+      $modules = $editable->get("module") ?: [];
+      if (isset($modules["s3fs"])) {
+        unset($modules["s3fs"]);
+        $editable->set("module", $modules)->save();
+        echo "Removed s3fs from core.extension active config\n";
+      }
+      \Drupal::keyValue("system.schema")->delete("s3fs");
+      foreach (\Drupal::configFactory()->listAll("s3fs.") as $name) {
+        \Drupal::configFactory()->getEditable($name)->delete();
+        echo "Deleted $name\n";
+      }
+    ' >> /var/log/cloud-init-output.log 2>&1
+    sudo -u drupal $DRUSH cache:rebuild >> /var/log/cloud-init-output.log 2>&1
+    # Import config if config directory has files
+    if [ -f "$CONFIG_SYNC_DIR/system.site.yml" ]; then
+      echo "Importing configuration..." >> /var/log/cloud-init-output.log
+      sudo -u drupal $DRUSH config:import -y >> /var/log/cloud-init-output.log 2>&1 || {
+        echo "Config import failed (may be no changes), continuing..." >> /var/log/cloud-init-output.log
+      }
+    else
+      echo "No config in sync directory, skipping import" >> /var/log/cloud-init-output.log
+    fi
+    echo "Rebuilding caches..." >> /var/log/cloud-init-output.log
+    sudo -u drupal $DRUSH cache:rebuild >> /var/log/cloud-init-output.log 2>&1
+    echo "Drupal update complete" >> /var/log/cloud-init-output.log
+
+  # Restart web services after configuration
+  - systemctl restart php-fpm
+  - systemctl restart httpd
+
+  - echo "Cloud-init complete (dev environment)" >> /var/log/cloud-init-output.log

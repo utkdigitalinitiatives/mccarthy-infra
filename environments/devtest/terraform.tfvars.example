@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# This repository is public - never commit the populated file.
+
+project_name    = "mccarthy"
+storage_prefix  = "mcc"
+subscription_id = "REPLACE_WITH_SUBSCRIPTION_ID"
+location        = "eastus2"
+cost_center     = "REPLACE_WITH_COST_CENTER"
+
+tfstate_resource_group_name  = "mccarthy-tfstate-rg"
+tfstate_storage_account_name = "REPLACE_WITH_STATE_STORAGE_ACCOUNT"
+
+# Local applies authenticate with the Azure CLI, not a GitHub OIDC token.
+use_oidc = false
+
+# Developers who get an isolated drupal-media-<username> container.
+# Collect object IDs with: az ad user show --id <netid>@utk.edu --query id -o tsv
+developer_identities = {
+  # netid = "REPLACE_WITH_AAD_OBJECT_ID",
+}

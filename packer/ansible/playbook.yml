@@ -1,0 +1,166 @@
+---
+# Drupal App Image Playbook
+# This playbook runs on top of the base image and adds Drupal-specific components.
+# System packages, PHP, and Apache are all pre-installed in the base image.
+# Estimated runtime: ~2-3 minutes (vs ~8 minutes with full provisioning)
+#
+# App-repo integration: when drupal_repo is provided the codebase is cloned from
+# Git rather than scaffolded with composer create-project, so the Drupal codebase
+# stays in its own dev-owned repository.
+
+- name: Install and configure Drupal application
+  hosts: all
+  become: true
+
+  vars:
+    drupal_user: "drupal"
+    drupal_group: "drupal"
+    web_root: "/var/www/drupal"
+    drupal_version: "11"
+    # App-repo integration variables (passed from Packer)
+    drupal_repo: ""
+    drupal_ref: "main"
+
+  tasks:
+    # ==========================================================================
+    # Install Drupal - Git clone (app repo) or Composer create-project (fallback)
+    # ==========================================================================
+    - name: Clone Drupal codebase from the app repository
+      ansible.builtin.git:
+        repo: "{{ drupal_repo }}"
+        dest: "{{ web_root }}"
+        version: "{{ drupal_ref | default('main') }}"
+        force: true
+      become: true
+      become_user: "{{ drupal_user }}"
+      when: drupal_repo | default('') | length > 0
+
+    - name: Install Drupal project via Composer (fallback when no repo provided)
+      ansible.builtin.command:
+        cmd: /usr/local/bin/composer create-project drupal/recommended-project:^{{ drupal_version }} .
+        chdir: "{{ web_root }}"
+        creates: "{{ web_root }}/composer.json"
+      become: true
+      become_user: "{{ drupal_user }}"
+      environment:
+        COMPOSER_HOME: "/tmp/composer-{{ drupal_user }}"
+      when: drupal_repo | default('') | length == 0
+
+    # ==========================================================================
+    # Install dependencies from composer.lock (when cloning the app repo)
+    # ==========================================================================
+    - name: Install dependencies from composer.lock
+      ansible.builtin.command:
+        cmd: /usr/local/bin/composer install --no-dev --optimize-autoloader
+        chdir: "{{ web_root }}"
+      become: true
+      become_user: "{{ drupal_user }}"
+      environment:
+        COMPOSER_HOME: "/tmp/composer-{{ drupal_user }}"
+      when: drupal_repo | default('') | length > 0
+
+    # ==========================================================================
+    # Drupal directory structure
+    # ==========================================================================
+    - name: Create Drupal files directory
+      ansible.builtin.file:
+        path: "{{ web_root }}/web/sites/default/files"
+        state: directory
+        owner: "{{ drupal_user }}"
+        group: "{{ drupal_group }}"
+        mode: "0775"
+
+    - name: Create Drupal private files directory
+      ansible.builtin.file:
+        path: "{{ web_root }}/private"
+        state: directory
+        owner: "{{ drupal_user }}"
+        group: "{{ drupal_group }}"
+        mode: "0770"
+
+    - name: Create Drupal config sync directory
+      ansible.builtin.file:
+        path: "{{ web_root }}/config"
+        state: directory
+        owner: "{{ drupal_user }}"
+        group: "{{ drupal_group }}"
+        mode: "0775"
+
+    # ==========================================================================
+    # Drupal settings configuration
+    # ==========================================================================
+    - name: Copy default settings.php
+      ansible.builtin.copy:
+        src: "{{ web_root }}/web/sites/default/default.settings.php"
+        dest: "{{ web_root }}/web/sites/default/settings.php"
+        owner: "{{ drupal_user }}"
+        group: "{{ drupal_group }}"
+        mode: "0644"
+        remote_src: true
+        force: false
+
+    - name: Add environment-based configuration to settings.php
+      ansible.builtin.blockinfile:
+        path: "{{ web_root }}/web/sites/default/settings.php"
+        marker: "# {mark} ANSIBLE MANAGED - Environment Configuration"
+        block: |
+          /**
+           * Load database credentials from environment config file.
+           * This file is populated by cloud-init at boot time.
+           */
+          $drupal_env_file = '/etc/drupal/environment.php';
+          if (file_exists($drupal_env_file)) {
+            require_once $drupal_env_file;
+          }
+
+          /**
+           * Config sync directory.
+           */
+          $settings['config_sync_directory'] = '../config';
+
+          /**
+           * Private file path.
+           */
+          $settings['file_private_path'] = '../private';
+
+          /**
+           * Trusted host patterns - configured via environment.php
+           */
+          if (isset($trusted_host_patterns)) {
+            $settings['trusted_host_patterns'] = $trusted_host_patterns;
+          }
+
+          /**
+           * Hash salt - must be set via environment.php
+           */
+          if (isset($hash_salt)) {
+            $settings['hash_salt'] = $hash_salt;
+          }
+
+    - name: Create environment.php placeholder
+      ansible.builtin.template:
+        src: templates/drupal-environment.php.j2
+        dest: /etc/drupal/environment.php
+        owner: root
+        group: "{{ drupal_group }}"
+        mode: "0640"
+
+    # ==========================================================================
+    # Drush CLI symlink
+    # ==========================================================================
+    - name: Create symlink for drush
+      ansible.builtin.file:
+        src: "{{ web_root }}/vendor/bin/drush"
+        dest: /usr/local/bin/drush
+        state: link
+
+    # ==========================================================================
+    # Health check endpoint
+    # ==========================================================================
+    - name: Create health check endpoint
+      ansible.builtin.copy:
+        content: "OK"
+        dest: "{{ web_root }}/web/health"
+        owner: "{{ drupal_user }}"
+        group: "{{ drupal_group }}"
+        mode: "0644"
