@@ -165,6 +165,18 @@ az sig image-version list \
 
 Then push to `dev` in the app repo, or run `test-cloud-init.yml` manually.
 
+## 10. Re-enable the scheduled workflow
+
+`production-schedule.yml` was disabled at repo creation so its cron did not fire
+against resources that did not exist yet. Once production is applied:
+
+```bash
+gh workflow enable "Production Start/Stop Schedule"
+```
+
+The other four workflows are event-triggered and safe to leave active — nothing
+dispatches to them until the app repo exists.
+
 ---
 
 ## Acceptance test
