@@ -176,6 +176,10 @@ jobs:
           DB_NAME: ${{ vars.DB_NAME }}
           SECRETS_RG: ${{ vars.PROJECT_NAME }}-secrets-rg
         run: |
+          # ⚠️ KNOWN ISSUE — this installs PostgreSQL client 16 (what Ubuntu 24.04
+          # ships) against PostgreSQL 17 servers, and pg_dump refuses to read a
+          # server newer than itself. Fails on first use. Same issue and same fix
+          # as build-on-dispatch.yml; see the comment there and docs/TODO.md.
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client
 

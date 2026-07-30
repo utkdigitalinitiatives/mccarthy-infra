@@ -240,6 +240,30 @@ jobs:
           DB_NAME: ${{ vars.DB_NAME }}
           SECRETS_RG: ${{ vars.PROJECT_NAME }}-secrets-rg
         run: |
+          # ⚠️ KNOWN ISSUE — THIS STEP WILL FAIL ON THE FIRST RUN (noted 2026-07-30,
+          # deliberately left unfixed for now).
+          #
+          # ubuntu-latest is Ubuntu 24.04, which ships PostgreSQL client 16.14, and
+          # that is what this installs. Our servers are PostgreSQL 17. pg_dump
+          # refuses to read a server newer than itself:
+          #
+          #   pg_dump: error: server version: 17.x; pg_dump version: 16.14
+          #   pg_dump: error: aborting because of server version mismatch
+          #
+          # There is no override; --ignore-version was removed years ago. lib-main
+          # is unaffected only because it runs PostgreSQL 16, which happens to match
+          # the runner. Any server major > 16 breaks this, including 18.
+          #
+          # Fix when picked up: install from PGDG pinned to the server major, and
+          # drive both from one repo variable so they cannot drift apart --
+          #   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          #     | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          #   echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+          #     | sudo tee /etc/apt/sources.list.d/pgdg.list
+          #   sudo apt-get update -qq
+          #   sudo apt-get install -y -qq postgresql-client-${PG_MAJOR}
+          #
+          # Same issue in test-cloud-init.yml. See docs/TODO.md.
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client
 

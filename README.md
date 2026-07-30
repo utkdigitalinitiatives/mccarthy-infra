@@ -132,7 +132,9 @@ mccarthy-infra/
 │   ├── production/                # VNet, LB, PSQL, blob, VMSS     (apply 3rd)
 │   └── dev/                       # ephemeral dev VM               (apply 3rd; CI only)
 ├── bootstrap/azure-setup.sh       # one-time Azure setup, idempotent
-└── docs/bootstrap-runbook.md
+└── docs/
+    ├── bootstrap-runbook.md   # stand it up from nothing
+    └── TODO.md                # known issues and deferred work
 ```
 
 **Apply order is load-bearing:** `secrets` → `devtest` → `production` / `dev`.

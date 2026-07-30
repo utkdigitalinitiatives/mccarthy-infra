@@ -190,6 +190,11 @@ az sig image-version list \
 
 Then push to `dev` in the app repo, or run `test-cloud-init.yml` manually.
 
+> **This first run is expected to fail at `prepare-database`.** The runner
+> installs PostgreSQL client 16 (what Ubuntu 24.04 ships) and `pg_dump` refuses to
+> read our PostgreSQL 17 servers. Known and deferred — see
+> [docs/TODO.md](TODO.md) for the diagnosis and fix.
+
 ## 10. Re-enable the scheduled workflow
 
 `production-schedule.yml` was disabled at repo creation so its cron did not fire
@@ -227,3 +232,4 @@ Carried forward as warnings because they will bite the same way here.
 | Auto-stop wake-up race | The nightly deallocate means a cold boot re-runs the cloud-init ceremony. Same fix as above. |
 | Media SAS expiry | `media_sas_expiry` is a hard date. Media stops being served when it lapses. Put it on a calendar. |
 | Base image drift | The shared base is rebuilt monthly by lib-main-infra. Set `BASE_IMAGE_VERSION` to pin. |
+| Runner `pg_dump` older than the server | `prepare-database` fails on first run; client 16 vs server 17. Open, see [docs/TODO.md](TODO.md). |
