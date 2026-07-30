@@ -305,6 +305,7 @@ module "vmss" {
   # Cloud-init with database, storage, and Drupal configuration
   custom_data = templatefile("${path.module}/cloud-init.tftpl", {
     site_name               = var.project_name
+    install_profile         = var.drupal_install_profile
     db_host                 = module.postgresql.fqdn
     db_name                 = module.postgresql.database_name
     db_user                 = var.db_admin_username

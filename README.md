@@ -13,7 +13,7 @@ This is the **ops-owned** half of a pair, modelled on
 
 | Repo | Owner | Contains |
 |---|---|---|
-| `mccarthy` (not yet created) | devs | The Drupal 11 codebase. No build or deploy CI — only branch policy and cross-repo dispatch. |
+| [`mccarthy-index`](https://github.com/utkdigitalinitiatives/mccarthy-index) | devs | The Drupal 11 codebase. No build or deploy CI — only branch policy and cross-repo dispatch. |
 | `mccarthy-infra` (this repo) | ops | Packer image build, Terraform per environment, all deploy workflows. |
 
 Deployment is **VM-image based, not container based**. There is no container
@@ -65,6 +65,50 @@ Two consequences worth understanding before you rely on it:
 If `lib-main-infra` ever tears down its images resource group, this project's
 builds break. That coupling is the price of not duplicating a 27-minute monthly
 build.
+
+## VNet address allocation
+
+Every library Drupal site is a **spoke**; the hub is the Asimov AKS cluster,
+which hosts the SolrCloud these sites search against. Sites do not share a VNet
+— each gets its own and peers to Asimov independently. Peering is
+non-transitive, so every site reaches Solr and no site reaches another site.
+
+Azure allows many peerings per VNet (the limit is 500), so the constraint is not
+a count — it is that **address spaces must not overlap**. Two of the reserved
+ranges below are non-obvious:
+
+- `10.0.0.0/16` is Asimov's Kubernetes **service** CIDR. Peering a spoke on this
+  range still *succeeds*, because Azure only validates VNet address spaces — but
+  reply traffic to a VM at `10.0.1.x` can be intercepted inside the cluster as a
+  ClusterIP. Microsoft documents this as unsupported; the failure is intermittent
+  and hard to diagnose. `serviceCidr` is immutable after cluster creation, so the
+  spokes are what must move.
+- `10.1.0.0/16` is partly consumed by the `vireo-db` spoke, which is already
+  peered to Asimov and deliberately sits clear of `10.0.0.0/16`.
+
+**Reserved — never allocate from these:**
+
+| Range | Owner |
+|---|---|
+| `10.0.0.0/16` | Asimov Kubernetes service CIDR |
+| `10.1.0.0/16` | vireo-db spoke (`10.1.0.0/24`, `10.1.1.0/24`) |
+| `10.224.0.0/12` | Asimov AKS node VNet |
+| `10.244.0.0/16` | Asimov pod CIDR (Azure CNI overlay) |
+| `172.16.0.0/16` | `dns-test-rg` |
+
+**Per-site allocation — claim the next free /16 and add a row:**
+
+| Range | Site | Status |
+|---|---|---|
+| `10.10.0.0/16` | mccarthy | allocated (this repo) |
+| `10.11.0.0/16` | — | free |
+| `10.12.0.0/16` | — | free |
+| `10.20.0.0/16` | lib-main | **reserved for re-addressing** — lib-main currently sits on `10.0.0.0/16` and cannot cleanly peer to Asimov until it moves. Must happen before it goes live. |
+
+Within a site: `x.x.1.0/24` web subnet, `x.x.2.0/24` private endpoints.
+
+Verify against reality before allocating — `az network vnet list -o table` is the
+authoritative source, not this table.
 
 ## Repository layout
 
@@ -152,7 +196,7 @@ live in Key Vault, not here.
 | `NOTIFY_EMAIL_TO` / `NOTIFY_EMAIL_FROM` | | bootstrap |
 | `DEVTEST_DB_HOST` / `DEVTEST_STORAGE_ACCOUNT` | | after devtest apply |
 | `PROD_STORAGE_ACCOUNT` / `SUBNET_ID` | | after production apply |
-| `DRUPAL_SITE_UUID` | `uuidgen` | before production apply |
+| `DRUPAL_SITE_UUID` | `542dcd94-b092-493d-9561-7361fe4c34bd` | before production apply — read from the app repo, never generated |
 | `DOMAIN_NAME` / `PUBLIC_IP_ID` / `LB_DNS_LABEL` | | before production apply |
 
 No workflow contains a hardcoded resource group, server, or storage account
@@ -160,8 +204,9 @@ name — all are derived from `PROJECT_NAME` or read from a variable.
 
 ## Contract the app repo must satisfy
 
-`utkdigitalinitiatives/mccarthy` does not exist yet. When it is created it must
-implement the following, or this repo's pipelines will not fire.
+`mccarthy-index` exists but has no `.github/` directory at all, so nothing
+currently dispatches to this repo. It must implement the following before any
+pipeline here can fire.
 
 | Item | Value |
 |---|---|
@@ -171,7 +216,9 @@ implement the following, or this repo's pipelines will not fire.
 | Auth | GitHub App token via `actions/create-github-app-token`, scoped `repositories: mccarthy-infra`; `vars.DISPATCH_APP_ID` + `secrets.DISPATCH_APP_PRIVATE_KEY` |
 | Config sync dir | `config/` at project root (`$settings["config_sync_directory"] = "../config"`) |
 | Left empty in the repo | `$databases = []` and `$settings["hash_salt"] = ""` — infra injects both at boot |
-| Site UUID | fresh `uuidgen`, matching `config/system.site.yml` and the `DRUPAL_SITE_UUID` variable |
+| Site UUID | already set: `542dcd94-b092-493d-9561-7361fe4c34bd` in `config/system.site.yml`. Never re-generate — a reinstall+re-export changes it and breaks production config import. |
+| Install profile | `minimal` in `config/core.extension.yml`; must match `drupal_install_profile` here |
+| Branches | only `main` exists today; the pipeline needs a `dev` branch |
 | Custom theme location | `web/themes/custom/` |
 
 The event type names (`drupal-dev-merge` / `drupal-main-merge`) are deliberately

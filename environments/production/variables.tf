@@ -92,23 +92,40 @@ variable "image_version" {
   default     = "1.0.0"
 }
 
-# Networking
+# --- Networking ----------------------------------------------------------------
+#
+# This VNet is a SPOKE. The hub is the Asimov AKS cluster, which hosts SolrCloud
+# and which every library Drupal site is expected to peer with. Azure rejects
+# peering between VNets with overlapping address space, and -- less obviously --
+# the AKS *service* CIDR must not overlap a peered spoke either, or reply traffic
+# to a VM gets intercepted by kube-proxy as a ClusterIP.
+#
+# Reserved, do NOT allocate from these:
+#   10.0.0.0/16     Asimov Kubernetes service CIDR (immutable; also lib-main's
+#                   current production VNet, which is why lib-main cannot peer
+#                   to Asimov until it is re-addressed)
+#   10.1.0.0/16     vireo-db spoke (10.1.0.0/24 + 10.1.1.0/24), already peered
+#   10.224.0.0/12   Asimov AKS node VNet
+#   10.244.0.0/16   Asimov pod CIDR (Azure CNI overlay)
+#   172.16.0.0/16   dns-test-rg
+#
+# See README.md > VNet address allocation for the per-site table.
 variable "vnet_address_space" {
-  description = "Address space for the VNet"
+  description = "Address space for the VNet. Must not overlap any other spoke or the Asimov reserved ranges."
   type        = list(string)
-  default     = ["10.0.0.0/16"]
+  default     = ["10.10.0.0/16"]
 }
 
 variable "web_subnet_prefix" {
   description = "Address prefix for the web subnet"
   type        = string
-  default     = "10.0.1.0/24"
+  default     = "10.10.1.0/24"
 }
 
 variable "private_endpoints_prefix" {
   description = "Address prefix for private endpoints subnet"
   type        = string
-  default     = "10.0.2.0/24"
+  default     = "10.10.2.0/24"
 }
 
 variable "allowed_ssh_cidr_blocks" {
@@ -223,9 +240,34 @@ variable "drupal_admin_password" {
 }
 
 variable "drupal_site_uuid" {
-  description = "Fixed Drupal site UUID for config sync. Must match config/system.site.yml"
+  description = <<-EOT
+    Fixed Drupal site UUID for config sync. MUST equal the `uuid` in the app
+    repo's config/system.site.yml.
+
+    Do not generate a fresh one: the value already exists, created when the site
+    was first installed and captured by `drush config:export`. Drupal refuses to
+    import config whose source UUID differs from the target site's, so cloud-init
+    installs a throwaway site and immediately overwrites its UUID with this value
+    before running config:import. If the app repo is ever reinstalled and
+    re-exported the UUID changes and this must change with it.
+  EOT
   type        = string
-  # No default - must be provided for each site to ensure unique UUIDs
+  # No default - must be read from the app repo, per site.
+}
+
+variable "drupal_install_profile" {
+  description = <<-EOT
+    Drupal install profile used for the first-boot `drush site:install`.
+
+    MUST equal the `profile:` key in the app repo's config/core.extension.yml.
+    Drupal will not let config import change the install profile, so a mismatch
+    fails config:import on the first production boot -- the one boot where the
+    database is empty and site:install actually runs.
+
+    mccarthy-index uses `minimal`; lib-main uses `standard`.
+  EOT
+  type        = string
+  default     = "minimal"
 }
 
 variable "domain_name" {

@@ -278,7 +278,7 @@ write_files:
         log "Updates complete"
       else
         log "Installing Drupal..."
-        sudo -u drupal $DRUSH site:install standard \
+        sudo -u drupal $DRUSH site:install "${install_profile}" \
           --db-url="pgsql://${db_user}:$DB_PASSWORD@${db_host}:5432/${db_name}" \
           --site-name="${site_name}" \
           --account-name=admin \

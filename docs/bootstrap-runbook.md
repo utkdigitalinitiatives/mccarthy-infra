@@ -99,11 +99,24 @@ gh variable set DEVTEST_STORAGE_ACCOUNT --body "$(terraform output -raw storage_
 
 ## 6. Apply `environments/production/`
 
-Generate the site UUID once and keep it forever — it must match
-`config/system.site.yml` in the app repo or config import fails on every deploy:
+**Do not generate a site UUID.** It already exists. Read it out of the app repo,
+where it was written by `drush config:export` after the site was first installed:
 
 ```bash
-uuidgen | tr 'A-Z' 'a-z'
+grep '^uuid:' ~/projects/mccarthy-index/config/system.site.yml
+#   uuid: 542dcd94-b092-493d-9561-7361fe4c34bd
+```
+
+Cloud-init runs `drush site:install` (which mints a throwaway random UUID),
+immediately overwrites it with this value, then runs `config:import` — which
+Drupal refuses if the two disagree.
+
+Read the install profile from the same place, for the same reason: Drupal will
+not let config import change it, so a mismatch fails the first production boot.
+
+```bash
+grep '^profile:' ~/projects/mccarthy-index/config/core.extension.yml
+#   profile: minimal
 ```
 
 ```bash
@@ -123,7 +136,7 @@ Then:
 ```bash
 gh variable set PROD_STORAGE_ACCOUNT --body "$(terraform output -raw storage_account_name)"
 gh variable set SUBNET_ID            --body "$(terraform output -raw web_subnet_id)"
-gh variable set DRUPAL_SITE_UUID     --body "<the uuid you generated>"
+gh variable set DRUPAL_SITE_UUID     --body "$(grep '^uuid:' ~/projects/mccarthy-index/config/system.site.yml | awk '{print $2}')"
 gh variable set DOMAIN_NAME          --body "<site fqdn>"
 ```
 
@@ -142,10 +155,22 @@ out of your own state.
 
 ## 8. Create the app repository
 
-`utkdigitalinitiatives/mccarthy` does not exist yet. See the README's
-"Contract the app repo must satisfy" section for exactly what it needs to
-implement. Until it exists the build pipeline has nothing to clone and cannot
-be exercised end to end.
+The app repo is `utkdigitalinitiatives/mccarthy-index` (already created by the dev
+team, cloned to `~/projects/mccarthy-index`). It has **no `.github/` directory**,
+so nothing dispatches to this repo yet and the pipeline cannot be exercised end
+to end. See the README's "Contract the app repo must satisfy" for what it needs.
+
+Open items on the app-repo side, as of 2026-07-30:
+
+- no dispatch workflows and no dev-to-main branch guard
+- no `dev` branch; only `main`
+- no root `.gitignore`, so `vendor/` and `web/core/` are one `git add -A` from
+  being committed
+- no `az_blob_fs`; `system.file:default_scheme` is `public`, which on a VMSS is
+  local disk wiped by every reimage
+- DDEV declares PHP 8.4 / PostgreSQL 18 against production's 8.3 / 17. Core only
+  needs PHP >= 8.3 so that leg is fine, but a local PG18 dump cannot restore into
+  prod PG17.
 
 Register a GitHub App (or reuse lib-main's) with `contents: read` and
 `metadata: read` on this repo, install it on the app repo, and set

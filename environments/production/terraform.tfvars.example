@@ -27,9 +27,17 @@ image_name                  = "mccarthy-rocky-linux-9"
 image_version = "0.0.1"
 
 # --- Site ----------------------------------------------------------------------
-# Generate once with `uuidgen | tr 'A-Z' 'a-z'` and keep it forever. Must match
-# config/system.site.yml in the app repo or config import fails on every deploy.
-drupal_site_uuid = "REPLACE_WITH_UUID"
+# Do NOT generate a new UUID. Copy the `uuid` value out of the app repo's
+# config/system.site.yml -- it was created when the site was first installed and
+# captured by drush config:export. Config import fails on every deploy if these
+# disagree.
+#   mccarthy-index: 542dcd94-b092-493d-9561-7361fe4c34bd
+drupal_site_uuid = "REPLACE_WITH_UUID_FROM_APP_REPO"
+
+# Must equal the `profile:` key in the app repo's config/core.extension.yml.
+# Drupal will not let config import change the install profile.
+#   mccarthy-index: minimal   |   lib-main: standard
+drupal_install_profile = "minimal"
 
 domain_name  = "REPLACE_WITH_FQDN" # e.g. mccarthy.lib.utk.edu
 enable_https = true
