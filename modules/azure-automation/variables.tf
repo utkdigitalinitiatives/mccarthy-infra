@@ -42,10 +42,15 @@ variable "schedule_week_days" {
   default     = ["Friday"]
 }
 
+# Azure rejects a start_time less than 5 minutes in the future, so a hardcoded
+# date here is a time bomb: it works until it doesn't, and then every fresh
+# bootstrap fails. It was "2026-02-13T22:00:00-05:00" and duly went off. Leave
+# this null and main.tf anchors the first occurrence 10 days out at plan time.
+# Set it explicitly only to pin a specific first run.
 variable "schedule_start_time" {
-  description = "Start time for the schedule (RFC3339 format, date portion ignored for recurring)"
+  description = "First occurrence (RFC3339). Null anchors it 10 days out at plan time; recurrence is governed by schedule_week_days and schedule_timezone."
   type        = string
-  default     = "2026-02-13T22:00:00-05:00"
+  default     = null
 }
 
 variable "tags" {

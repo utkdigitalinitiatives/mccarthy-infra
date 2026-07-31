@@ -10,6 +10,52 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ## Open
 
+### `DefenderForStorageSettings/current` must be imported, never created
+
+**Found 2026-07-31 during the first devtest apply.**
+
+`modules/blob-storage` declares `azapi_resource.defender_for_storage` (created
+when `disable_defender_for_storage = true`). That resource is a **singleton that
+Azure provisions automatically** for every storage account, inheriting the
+subscription-level Defender settings. Terraform can therefore never create it:
+
+```
+Error: Resource already exists
+a resource with the ID ".../DefenderForStorageSettings/current" already exists -
+to be managed via Terraform this resource needs to be imported into the State.
+```
+
+**This will recur on every new storage account** — production has not been
+applied yet and will hit it. Unblock with:
+
+```bash
+terraform import 'module.blob_storage.azapi_resource.defender_for_storage[0]' \
+  '<storage-account-id>/providers/Microsoft.Security/DefenderForStorageSettings/current?api-version=2022-12-01-preview'
+```
+
+Proper fix: switch the module to `azapi_update_resource`, which patches an
+existing resource instead of asserting ownership of its creation. Not done yet
+because it changes the module for devtest and production together and deserves
+its own apply.
+
+---
+
+### azurerm misreads `runbook_type`, forcing a phantom replacement
+
+**Found 2026-07-31. Worked around, not fixed.**
+
+`azurerm_automation_runbook.stop_postgresql` is declared `PowerShell72`. Provider
+4.81 reads it back as `PowerShell`, which forces replacement on every single
+plan. Azure itself is correct — `az automation runbook show` reports
+`runbookType: PowerShell72` — so this is a provider read bug, not real drift.
+
+Suppressed with `lifecycle { ignore_changes = [runbook_type] }` in
+`modules/azure-automation/main.tf`. **Re-test on provider upgrades** and drop the
+workaround once the read is fixed, otherwise a genuine runbook-type change would
+be silently ignored.
+
+---
+
 ### App repo (`mccarthy-index`) is not wired to this pipeline
 
 Tracked in the README's "Contract the app repo must satisfy" and in

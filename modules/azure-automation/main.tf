@@ -66,6 +66,15 @@ resource "azurerm_automation_runbook" "stop_postgresql" {
   content = file("${path.module}/scripts/Stop-TaggedPostgreSql.ps1")
 
   tags = local.common_tags
+
+  # azurerm 4.81 reads runbook_type back as "PowerShell" for a runbook created
+  # as "PowerShell72", so every plan wants to replace this. Azure itself has it
+  # right -- `az automation runbook show` reports runbookType: PowerShell72 --
+  # so this suppresses a provider misread, not real drift. Re-test on provider
+  # upgrades; drop this once the read is fixed upstream.
+  lifecycle {
+    ignore_changes = [runbook_type]
+  }
 }
 
 resource "azurerm_automation_schedule" "weekly_stop" {
@@ -76,7 +85,23 @@ resource "azurerm_automation_schedule" "weekly_stop" {
   interval                = 1
   timezone                = var.schedule_timezone
   week_days               = var.schedule_week_days
-  start_time              = var.schedule_start_time
+
+  # Only the time-of-day and the weekday matter for recurrence; the date just
+  # anchors the first run, and Azure requires it be in the future at create
+  # time. Computing it keeps a fresh bootstrap from failing on a stale literal.
+  # The -05:00 offset is EST -- during EDT this shifts only which instant Azure
+  # treats as the first occurrence, not the recurring 22:00 local firing, which
+  # timezone governs.
+  start_time = coalesce(
+    var.schedule_start_time,
+    "${formatdate("YYYY-MM-DD", timeadd(plantimestamp(), "240h"))}T22:00:00-05:00"
+  )
+
+  # start_time is recomputed on every plan. Without this the schedule shows a
+  # permanent diff and would be replaced on each apply.
+  lifecycle {
+    ignore_changes = [start_time]
+  }
 }
 
 resource "azurerm_automation_job_schedule" "stop_postgresql" {
