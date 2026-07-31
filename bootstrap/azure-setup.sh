@@ -254,6 +254,26 @@ assign_role "Role Based Access Control Administrator" "/subscriptions/$SUBSCRIPT
 # MUST exist before shared key access is disabled (see the note below).
 assign_role "Storage Blob Data Contributor" "$STORAGE_ID"
 
+# The same grant for the human running the local applies in runbook steps 3-6.
+# Owner at subscription scope does NOT confer data-plane blob access, so without
+# this a local `terraform init -backend-config=use_azuread_auth=true` cannot read
+# state -- the SP grant above only helps CI.
+OPERATOR_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
+if [ -n "$OPERATOR_OBJECT_ID" ]; then
+  if az role assignment list --assignee "$OPERATOR_OBJECT_ID" --role "Storage Blob Data Contributor" \
+      --scope "$STORAGE_ID" --query "[0].id" -o tsv 2>/dev/null | grep -q .; then
+    echo "exists:  Storage Blob Data Contributor on ${STORAGE_ID##*/} (operator)"
+  else
+    az role assignment create --assignee-object-id "$OPERATOR_OBJECT_ID" \
+      --assignee-principal-type User \
+      --role "Storage Blob Data Contributor" --scope "$STORAGE_ID" --output none
+    echo "created: Storage Blob Data Contributor on ${STORAGE_ID##*/} (operator)"
+  fi
+else
+  echo "WARNING: could not resolve the signed-in user; grant yourself" >&2
+  echo "         Storage Blob Data Contributor on $STORAGE_ID before a local apply." >&2
+fi
+
 # --- Summary ------------------------------------------------------------------
 
 banner "Bootstrap complete"
@@ -290,7 +310,9 @@ Values that only exist AFTER the corresponding terraform apply:
   DEVTEST_STORAGE_ACCOUNT <- terraform -chdir=environments/devtest output -raw storage_account_name
   PROD_STORAGE_ACCOUNT    <- terraform -chdir=environments/production output -raw storage_account_name
   SUBNET_ID               <- terraform -chdir=environments/production output -raw web_subnet_id
-  DRUPAL_SITE_UUID        <- uuidgen | tr 'A-Z' 'a-z'  (must match the app repo's config/system.site.yml)
+  DRUPAL_SITE_UUID        <- grep '^uuid:' ~/projects/mccarthy-index/config/system.site.yml
+                             NEVER generate one. It already exists in the app repo,
+                             and config:import fails against a mismatched site UUID.
   DOMAIN_NAME             <- the site FQDN
   PUBLIC_IP_ID            <- resource ID of the externally-managed public IP, if used
   LB_DNS_LABEL            <- DNS label if Terraform creates the public IP instead

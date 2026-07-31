@@ -8,8 +8,20 @@ operational notes in `.git/info/exclude`, which is a local-only mechanism, so
 the runbook exists on exactly one laptop. Anything genuinely secret belongs in
 Key Vault, not in a hidden file; everything else belongs in git.
 
-**Nothing in this runbook has been executed yet.** The repository is scaffolding
-only. Expect to hit rough edges on the first real run and fix them here.
+**Status: steps 1–5 executed 2026-07-31.** `secrets` and `devtest` are applied and
+re-plan clean; `production` and `dev` have not been touched. The first run did hit
+rough edges, and the fixes are folded in below — see `docs/TODO.md` for the two
+that are still open, one of which (the Defender for Storage singleton) will recur
+on the production apply.
+
+| Step | State |
+|---|---|
+| 1. Bootstrap script | done — state account `mccarthytfstate2de2eef0` |
+| 2. Repo secrets/variables | done — 20 variables, 4 secrets |
+| 3. `environments/secrets` | applied — Key Vault `mccarthy-kv-553468f1` |
+| 4. Manual Key Vault secrets | done — all three seeded |
+| 5. `environments/devtest` | applied — PostgreSQL 18, `mccdevtesth6srb8na` |
+| 6+ | not started |
 
 ---
 
@@ -60,8 +72,16 @@ terraform apply
 az ad sp show --id <appId> --query id -o tsv
 ```
 
-Local applies authenticate with your `az login` session, so set `use_oidc =
-false` in `terraform.tfvars` (already the default in the example file).
+Local applies authenticate with your `az login` session. This environment has no
+`use_oidc` variable — omitting `-backend-config="use_oidc=true"` from `init` is
+all that is needed. `devtest` and `production` *do* declare one, already `false`
+in their example tfvars; see step 5.
+
+`use_azuread_auth=true` also means **you** need `Storage Blob Data Contributor`
+on the state storage account. `bootstrap/azure-setup.sh` grants it to the signed-in
+user, but if you bootstrapped as someone else, grant it before running `init` or
+it fails reading state. Owner at subscription scope is not sufficient — it carries
+no data-plane blob access.
 
 ## 4. Seed the manual Key Vault secrets
 
