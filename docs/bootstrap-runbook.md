@@ -168,9 +168,9 @@ Open items on the app-repo side, as of 2026-07-30:
   being committed
 - no `az_blob_fs`; `system.file:default_scheme` is `public`, which on a VMSS is
   local disk wiped by every reimage
-- DDEV declares PHP 8.4 / PostgreSQL 18 against production's 8.3 / 17. Core only
-  needs PHP >= 8.3 so that leg is fine, but a local PG18 dump cannot restore into
-  prod PG17.
+- DDEV declares PHP 8.4 against production's 8.3. Core only needs PHP >= 8.3, so
+  this is a difference rather than a defect. PostgreSQL now matches at 18 on both
+  sides, so local dumps restore into production cleanly.
 
 Register a GitHub App (or reuse lib-main's) with `contents: read` and
 `metadata: read` on this repo, install it on the app repo, and set
@@ -190,10 +190,10 @@ az sig image-version list \
 
 Then push to `dev` in the app repo, or run `test-cloud-init.yml` manually.
 
-> **This first run is expected to fail at `prepare-database`.** The runner
-> installs PostgreSQL client 16 (what Ubuntu 24.04 ships) and `pg_dump` refuses to
-> read our PostgreSQL 17 servers. Known and deferred — see
-> [docs/TODO.md](TODO.md) for the diagnosis and fix.
+> `prepare-database` installs the PostgreSQL client from PGDG pinned to
+> `vars.PG_MAJOR`. If that variable is unset the workflows fall back to `18`, which
+> matches the Terraform default — but set it explicitly, because it is also what
+> feeds `TF_VAR_postgresql_version` on production applies.
 
 ## 10. Re-enable the scheduled workflow
 
@@ -232,4 +232,4 @@ Carried forward as warnings because they will bite the same way here.
 | Auto-stop wake-up race | The nightly deallocate means a cold boot re-runs the cloud-init ceremony. Same fix as above. |
 | Media SAS expiry | `media_sas_expiry` is a hard date. Media stops being served when it lapses. Put it on a calendar. |
 | Base image drift | The shared base is rebuilt monthly by lib-main-infra. Set `BASE_IMAGE_VERSION` to pin. |
-| Runner `pg_dump` older than the server | `prepare-database` fails on first run; client 16 vs server 17. Open, see [docs/TODO.md](TODO.md). |
+| PostgreSQL major changes | Change `PG_MAJOR` and the Terraform default together. It pins both the server and the runner's `pg_dump`; a client older than the server cannot dump it at all. |

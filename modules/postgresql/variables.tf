@@ -21,7 +21,7 @@ variable "location" {
 variable "postgresql_version" {
   description = "PostgreSQL major version"
   type        = string
-  default     = "17"
+  default     = "18"
 }
 
 variable "sku_name" {

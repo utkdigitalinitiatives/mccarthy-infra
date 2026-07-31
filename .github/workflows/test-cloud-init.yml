@@ -175,13 +175,17 @@ jobs:
           DB_USER: ${{ vars.DB_ADMIN_USERNAME }}
           DB_NAME: ${{ vars.DB_NAME }}
           SECRETS_RG: ${{ vars.PROJECT_NAME }}-secrets-rg
+          PG_MAJOR: ${{ vars.PG_MAJOR || '18' }}
         run: |
-          # ⚠️ KNOWN ISSUE — this installs PostgreSQL client 16 (what Ubuntu 24.04
-          # ships) against PostgreSQL 17 servers, and pg_dump refuses to read a
-          # server newer than itself. Fails on first use. Same issue and same fix
-          # as build-on-dispatch.yml; see the comment there and docs/TODO.md.
+          # Client from PGDG pinned to the server major -- Ubuntu 24.04's default
+          # client is 16 and pg_dump refuses to read a newer server. Same reasoning
+          # as build-on-dispatch.yml; see the fuller comment there.
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --yes --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
+          sudo apt-get install -y -qq "postgresql-client-${PG_MAJOR}"
 
           KV_NAME=$(az keyvault list -g "$SECRETS_RG" --query "[0].name" -o tsv)
           DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \

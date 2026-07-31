@@ -34,7 +34,7 @@ app repo: dev -> main     --(drupal-main-merge)--> resolve newest gallery image
 
 ## Architecture
 
-- **Azure Load Balancer** (Standard, L4) → **VMSS** (Rocky Linux 9) → **PostgreSQL Flexible Server 17**
+- **Azure Load Balancer** (Standard, L4) → **VMSS** (Rocky Linux 9) → **PostgreSQL Flexible Server 18**
 - **Azure Blob Storage** for Drupal media, via the `az_blob_fs` Drupal module
 - **Azure Key Vault** for shared secrets, read at boot through managed identity
 - **Azure Compute Gallery** for Packer-built images — *shared with lib-main-infra*
@@ -193,6 +193,7 @@ live in Key Vault, not here.
 | `TF_STATE_RESOURCE_GROUP` | `mccarthy-tfstate-rg` | bootstrap |
 | `TF_STATE_STORAGE_ACCOUNT` | generated | bootstrap |
 | `DB_ADMIN_USERNAME` / `DB_NAME` | `drupaladmin` / `drupal` | bootstrap |
+| `PG_MAJOR` | `18` | bootstrap — pins the server *and* the runner's `pg_dump` |
 | `MEDIA_CONTAINER` | `drupal-media` | bootstrap |
 | `PROD_DB_HOST` | `mccarthy-production-psql.postgres.database.azure.com` | bootstrap |
 | `NOTIFY_EMAIL_TO` / `NOTIFY_EMAIL_FROM` | | bootstrap |
@@ -250,7 +251,7 @@ backlog. Deliberate divergences:
 | Resource groups | created by both bootstrap and Terraform (forces an import) | created by bootstrap, read by Terraform |
 | Naming | `lib-main` / `drupal` hardcoded in `.tf` files | `var.project_name` + `var.storage_prefix` |
 | Storage account name | `drupal` + env + 8 random = exactly 24 chars, no headroom | short prefix + abbreviated env = 15 chars |
-| PostgreSQL | 16 | 17 |
+| PostgreSQL | 16 | 18, matching the app repo's DDEV |
 | VMSS size | `Standard_B2s` (restricted series) | `Standard_B2als_v2` |
 | Dev-merge concurrency | workflow-level `cancel-in-progress: true`, which has killed applies mid-run twice | per-job: build cancels, apply queues |
 | Action pins | mixed node20/node24, one floating `@main` | all pinned to node24 releases |

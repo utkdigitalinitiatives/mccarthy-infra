@@ -278,6 +278,7 @@ Set the repository secrets and variables with:
   gh variable set TF_STATE_STORAGE_ACCOUNT --repo $GITHUB_ORG/$INFRA_REPO --body "$STORAGE_NAME"
   gh variable set DB_ADMIN_USERNAME       --repo $GITHUB_ORG/$INFRA_REPO --body "drupaladmin"
   gh variable set DB_NAME                 --repo $GITHUB_ORG/$INFRA_REPO --body "drupal"
+  gh variable set PG_MAJOR                --repo $GITHUB_ORG/$INFRA_REPO --body "18"
   gh variable set MEDIA_CONTAINER         --repo $GITHUB_ORG/$INFRA_REPO --body "drupal-media"
   gh variable set PROD_DB_HOST            --repo $GITHUB_ORG/$INFRA_REPO --body "${PROJECT_NAME}-production-psql.postgres.database.azure.com"
   gh variable set NOTIFY_EMAIL_TO         --repo $GITHUB_ORG/$INFRA_REPO --body "<comma-separated recipients>"
