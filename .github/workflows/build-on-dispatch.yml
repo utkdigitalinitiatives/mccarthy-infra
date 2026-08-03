@@ -189,6 +189,7 @@ jobs:
             -var "gallery_resource_group_name=${{ vars.GALLERY_RESOURCE_GROUP }}" \
             -var "gallery_name=${{ vars.GALLERY_NAME }}" \
             -var "image_name=${{ vars.APP_IMAGE_NAME }}" \
+            -var "build_resource_group_name=${{ vars.BUILD_RESOURCE_GROUP || vars.GALLERY_RESOURCE_GROUP }}" \
             -var "location=${{ vars.LOCATION }}" \
             -var "replication_regions=[\"${{ vars.LOCATION }}\"]" \
             -var "drupal_repo=$DRUPAL_REPO" \

@@ -85,6 +85,19 @@ variable "os_disk_size_gb" {
 }
 
 # Build VM networking (optional - uses a Packer-managed temporary VNet if unset)
+variable "build_resource_group_name" {
+  description = <<-EOT
+    Existing resource group to build the VM in. Leave null and Packer creates a
+    throwaway pkr-Resource-Group-* instead, which needs resourceGroups/write at
+    SUBSCRIPTION scope. This project's service principal holds Contributor on
+    five named resource groups and nothing wider, by design, so CI must set this.
+    Note that Packer reports the resulting AuthorizationFailed as "a resource
+    group with that name already exists", which is not what happened.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "build_vnet_name" {
   description = "VNet name for build VM (optional)"
   type        = string

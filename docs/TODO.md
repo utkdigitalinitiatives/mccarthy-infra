@@ -77,6 +77,45 @@ lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 
 ## Resolved
 
+### Packer wanted a subscription-scope resource group the SP cannot create
+
+**Found 2026-08-03 on the second CI run, once the OIDC fix below let it get far
+enough to fail on something else.**
+
+By default the azure-arm builder creates a throwaway `pkr-Resource-Group-*`,
+which needs `Microsoft.Resources/subscriptions/resourceGroups/write` at
+subscription scope. This project's service principal holds Contributor on five
+named resource groups and nothing wider — deliberately, and unlike
+`lib-main-github-actions`, which has subscription-wide Contributor and so never
+hit this.
+
+Packer reports the resulting `AuthorizationFailed` as:
+
+```
+A resource group with that name already exists.
+Please use build_resource_group_name to use an existing resource group.
+```
+
+which is wrong and cost some time — the group did not exist, the SP could not
+read the scope to find out. The advice it gives is right, though.
+
+**Fix:** `build_resource_group_name` is now a Packer variable, and
+`build-on-dispatch.yml` passes `vars.BUILD_RESOURCE_GROUP` falling back to
+`vars.GALLERY_RESOURCE_GROUP` (`lib-main-images-rg`), where the SP already has
+Contributor and where the intermediate managed image already lands. The build VM
+and its disk/NIC are transient and Packer cleans them up.
+
+Note `location` and `build_resource_group_name` are mutually exclusive — Packer
+derives the region from the group and rejects both — so `location` is set
+conditionally. Leaving the new variable null preserves the old temp-RG behaviour
+for anyone running with broader rights; both paths pass `packer validate`.
+
+If mccarthy should stop borrowing lib-main's resource group for builds, the
+change is a dedicated `mccarthy-images-rg` plus a Contributor assignment in
+`bootstrap/azure-setup.sh` and a `BUILD_RESOURCE_GROUP` repo variable.
+
+---
+
 ### GitHub now issues an immutable OIDC subject, and Entra matched the old one
 
 **Found 2026-08-03 on the very first CI run — `Azure Login`, the first step that
