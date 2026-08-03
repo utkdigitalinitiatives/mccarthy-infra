@@ -63,11 +63,48 @@ be silently ignored.
 
 ### App repo (`mccarthy-index`) is not wired to this pipeline
 
-Tracked in the README's "Contract the app repo must satisfy" and in
-`docs/bootstrap-runbook.md` step 8. Summary: no `.github/` directory, no `dev`
-branch, no root `.gitignore`, no `az_blob_fs` (so media on a VMSS lands on local
-disk and is wiped by every reimage), and DDEV declares PHP 8.4 against
-production's 8.3.
+**This is the only remaining bootstrap step.** Steps 1–7, 9 and 10 are done;
+production is applied and serving. The README's "Contract the app repo must
+satisfy" is the authoritative list. State verified 2026-08-03 — the repo has not
+been touched since 2026-07-07.
+
+**Gating decision: is `mccarthy-index` going public?** It is private today, and
+**no git credential is plumbed into Packer** — `var.drupal_repo` reaches
+`ansible.builtin.git` in `packer/ansible/playbook.yml` with nothing to
+authenticate with, so the clone fails against a private repo. Going public
+dissolves this; staying private means threading a token through
+`build-on-dispatch.yml` → Packer → the playbook. Nothing else in step 8 can be
+tested until one of those happens.
+
+Infra-side work, once decided:
+
+- token plumbing into Packer, if the repo stays private
+- a GitHub App with `contents: read` + `metadata: read` installed on the app
+  repo (or reuse lib-main's), supplying `vars.DISPATCH_APP_ID` and
+  `secrets.DISPATCH_APP_PRIVATE_KEY` **there**, not here
+- `deploy-on-main-merge.yml` listens for `drupal-main-merge` and has never fired
+
+App-repo side:
+
+- no `.github/` at all — needs both dispatch workflows, `paths-ignore` for docs,
+  and a retry around the `gh api` call (lib-main lost a pipeline run to a silent
+  server-side dispatch failure)
+- no `dev` branch; only `main`, and the flow is `topic → dev → main`
+- no root `.gitignore`, so `vendor/` and `web/core/` are one `git add -A` away
+
+**Most likely to bite on the first real deploy:** `composer.json` requires
+**neither `drupal/az_blob_fs` nor `drupal/key`**, and neither appears in
+`config/core.extension.yml`. Cloud-init nonetheless writes
+`$settings['file_default_scheme'] = 'azblob'`,
+`$config['az_blob_fs.settings'][...]` and `$config['key.key.azure_blob_key'][...]`
+into `settings.php` unconditionally. The repo has `media`, `media_library`,
+`image` and `file` enabled, so it does handle files. Adding config is not enough —
+**the modules have to be required in `composer.json` first**, or Drupal is pointed
+at a stream wrapper that does not exist. `config/system.file.yml` still says
+`default_scheme: public`, which on a VMSS is local disk wiped by every reimage.
+
+Not a defect, just a difference: DDEV declares PHP 8.4 against production's 8.3.
+Core needs >= 8.3. PostgreSQL matches at 18 on both sides since 2026-07-31.
 
 ---
 
