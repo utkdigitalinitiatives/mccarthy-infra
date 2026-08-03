@@ -119,6 +119,10 @@ gh variable set DEVTEST_STORAGE_ACCOUNT --body "$(terraform output -raw storage_
 
 ## 6. Apply `environments/production/`
 
+> **Do step 9 first.** Production reads the app image through a data source, so a
+> plan fails outright until `mccarthy-rocky-linux-9` has at least one version.
+> The numbering here is historical.
+
 **Do not generate a site UUID.** It already exists. Read it out of the app repo,
 where it was written by `drush config:export` after the site was first installed:
 
@@ -138,6 +142,39 @@ not let config import change it, so a mismatch fails the first production boot.
 grep '^profile:' ~/projects/mccarthy-index/config/core.extension.yml
 #   profile: minimal
 ```
+
+### Using an externally-managed public IP
+
+`dns-test-rg` holds the shared dev/test ingress addresses that OIT has pointed
+real names at. mccarthy uses `libtest1` (132.196.154.18 / libtest1.lib.utk.edu);
+`libdev1` in the same RG fronts lib-main production the same way. Set
+`public_ip_id` to the resource ID and leave `lb_dns_label` null — it is ignored.
+
+Two things have to be true before the apply, both done for libtest1 on
+2026-08-03 but not for whatever address comes next:
+
+```bash
+# 1. An Azure public IP can front only one resource. libtest1 was a secondary
+#    ipconfig on the DNS-test VM's NIC. Note --remove: passing
+#    --public-ip-address "" makes Azure resolve an empty resource name and fails
+#    with InvalidResourceReference.
+az network nic ip-config update -g dns-test-rg \
+  --nic-name dns-test568_z2 -n ipconfig-libtest1 --remove publicIpAddress
+
+# 2. CI needs publicIPAddresses/join/action on it. The service principal is
+#    scoped to the five mccarthy RGs and inherits nothing, so a local apply
+#    (subscription Owner via PIM) succeeds where deploy-production.yml would not.
+#    Scoped to the IP, not the RG -- lib-main's SP gets this from subscription-wide
+#    Contributor, which is not a pattern worth copying.
+az role assignment create --assignee <sp object id> \
+  --role "Network Contributor" \
+  --scope ".../resourceGroups/dns-test-rg/providers/Microsoft.Network/publicIPAddresses/libtest1"
+```
+
+`domain_name` is not only the TLS CN. It is baked into `settings.php` as a
+trusted host pattern and as `az_blob_cdn_host_name`, which is what makes Drupal
+emit media URLs on the site domain for Apache to rewrite to blob + SAS. Changing
+it later is a re-apply plus a VMSS reimage — all config, no data migration.
 
 ```bash
 cd environments/production
@@ -208,7 +245,42 @@ az sig image-version list \
   --query "sort_by([].name, &@)[-1]" -o tsv
 ```
 
-Then push to `dev` in the app repo, or run `test-cloud-init.yml` manually.
+**This has to happen before step 6, despite the numbering.** Production's
+`data.azurerm_shared_image_version` lookup fails at *refresh*, so without a
+version in `mccarthy-rocky-linux-9` production cannot even be planned.
+
+Only `build-on-dispatch.yml` writes into that image definition, and it is
+`repository_dispatch`-only. `test-cloud-init.yml` **consumes** an existing
+version — it never builds one — and a push to the app repo's `dev` branch cannot
+dispatch anything until that repo has workflows (step 8). So the first image has
+to be kicked off by hand:
+
+```bash
+gh api repos/utkdigitalinitiatives/mccarthy-infra/dispatches \
+  -f event_type=drupal-dev-merge \
+  -f 'client_payload[bootstrap_build]=true'
+```
+
+`bootstrap_build` builds the image with **no app repo**, from vanilla Drupal via
+`composer create-project`, and skips the three downstream jobs (they all read
+from a production that does not exist yet). That is enough to prove out the load
+balancer, the public IP, TLS issuance and cloud-init — but it is not the site.
+Rebuild from the app repo once step 8 is done.
+
+Use `-f`, not `-F`. `-F` has magic type conversion: it would send a JSON boolean
+`true` rather than the string, and GitHub's expression comparison coerces
+mismatched types to numbers — `true` becomes 1, `'true'` becomes NaN, and
+`1 != NaN` is true, so the downstream guard would let the jobs run. The workflow
+normalises the flag into a job output for exactly this reason, but there is no
+sense in leaning on that.
+
+Afterwards, feed the version it produced into production's `terraform.tfvars`:
+
+```bash
+gh run list --workflow "Build on Dispatch" --limit 1
+az sig image-version list -g lib-main-images-rg --gallery-name lib_main_gallery \
+  --gallery-image-definition mccarthy-rocky-linux-9 --query "[].name" -o tsv
+```
 
 > `prepare-database` installs the PostgreSQL client from PGDG pinned to
 > `vars.PG_MAJOR`. If that variable is unset the workflows fall back to `18`, which

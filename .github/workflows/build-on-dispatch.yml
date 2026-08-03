@@ -7,6 +7,8 @@ name: Build on Dispatch
 #   - drupal_repo: Git clone URL
 #   - drupal_ref:  Branch to check out (dev)
 #   - drupal_sha:  Full commit SHA
+#   - bootstrap_build: "true" to build the image only, from vanilla Drupal.
+#       Omit it for every real dev-merge. See "Validate dispatch payload" below.
 #
 # NOTE ON CONCURRENCY: there is deliberately no workflow-level concurrency block.
 # A run-wide cancel tears down every job including deploy-dev mid-`terraform
@@ -58,22 +60,61 @@ jobs:
       cancel-in-progress: true
     outputs:
       image_version: ${{ steps.version.outputs.version }}
+      bootstrap: ${{ steps.validate.outputs.bootstrap }}
 
     steps:
       - name: Checkout infrastructure code
         uses: actions/checkout@v7.0.1
 
       - name: Validate dispatch payload
+        id: validate
+        env:
+          DRUPAL_REPO: ${{ github.event.client_payload.drupal_repo }}
+          DRUPAL_REF: ${{ github.event.client_payload.drupal_ref }}
+          DRUPAL_SHA: ${{ github.event.client_payload.drupal_sha }}
+          BOOTSTRAP_BUILD: ${{ github.event.client_payload.bootstrap_build }}
         run: |
           echo "Event type: ${{ github.event.action }}"
-          echo "Drupal repo: ${{ github.event.client_payload.drupal_repo }}"
-          echo "Drupal ref: ${{ github.event.client_payload.drupal_ref }}"
-          echo "Drupal SHA: ${{ github.event.client_payload.drupal_sha }}"
+          echo "Drupal repo: $DRUPAL_REPO"
+          echo "Drupal ref: $DRUPAL_REF"
+          echo "Drupal SHA: $DRUPAL_SHA"
 
-          if [ -z "${{ github.event.client_payload.drupal_repo }}" ]; then
-            echo "::error::Missing drupal_repo in payload"
-            exit 1
+          # Normalise the flag to a string ONCE, here, and let the downstream jobs
+          # gate on this output rather than on client_payload directly.
+          #
+          # Both a JSON boolean true and the string "true" arrive at this shell as
+          # `true`, so the test below cannot tell them apart -- but a job-level
+          # `if:` can. GitHub coerces mismatched types to numbers before comparing,
+          # and while `true` casts to 1, the string 'true' casts to NaN. So
+          # `true != 'true'` evaluates to `1 != NaN`, which is *true*: a boolean
+          # payload would sail straight past a guard written against the string.
+          # Job outputs are always strings, so the comparison downstream is exact.
+          if [ "$BOOTSTRAP_BUILD" = "true" ]; then
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
           fi
+
+          if [ -n "$DRUPAL_REPO" ]; then
+            exit 0
+          fi
+
+          # Packer and the Ansible playbook already fall back to
+          # `composer create-project` when drupal_repo is empty -- that is how the
+          # very first image gets built, before the app repo has any dispatch
+          # workflows to send a real payload. Nothing else could produce the first
+          # version of the app image definition.
+          #
+          # That fallback is actively wrong for a real dev-merge, though: it would
+          # quietly bake vanilla Drupal and ship it over the actual site. So an
+          # empty repo is only honoured when the caller says it meant it.
+          if [ "$BOOTSTRAP_BUILD" = "true" ]; then
+            echo "::warning::Bootstrap build: no drupal_repo, installing vanilla Drupal via Composer."
+            exit 0
+          fi
+
+          echo "::error::Missing drupal_repo in payload"
+          exit 1
 
       - name: Generate version
         id: version
@@ -173,6 +214,11 @@ jobs:
   prepare-database:
     name: Prepare Database
     needs: build-image
+    # A bootstrap build stops at the image. Everything below this point reads
+    # from production, which does not exist yet when the first image is built.
+    # Gate on the normalised job output, never on client_payload directly -- see
+    # the type-coercion note in build-image's validate step.
+    if: ${{ needs.build-image.outputs.bootstrap != 'true' }}
     runs-on: ubuntu-latest
     concurrency:
       group: devtest-database
@@ -293,6 +339,7 @@ jobs:
   sync-blob-storage:
     name: Sync Blob Storage
     needs: build-image
+    if: ${{ needs.build-image.outputs.bootstrap != 'true' }}
     runs-on: ubuntu-latest
     concurrency:
       group: devtest-blob-storage
@@ -355,6 +402,7 @@ jobs:
   deploy-dev:
     name: Deploy Dev
     needs: [build-image, prepare-database, sync-blob-storage]
+    if: ${{ needs.build-image.outputs.bootstrap != 'true' }}
     runs-on: ubuntu-latest
     environment: dev
     # Never cancelled: a superseded run QUEUES behind this one rather than
