@@ -21,7 +21,7 @@ touched. Both runs hit rough edges and the fixes are folded in below — see
 | 4. Manual Key Vault secrets | done — all three seeded |
 | 5. `environments/devtest` | applied — PostgreSQL 18, `mccdevtesth6srb8na` |
 | 6. `environments/production` | applied — both passes, re-plans clean; serving on libtest1 |
-| 7. Harden state account | not started |
+| 7. Harden state account | done — `allowSharedKeyAccess: false` |
 | 8. App repo wiring | not started — no `.github/` in `mccarthy-index` |
 | 9. First image build | done — `0.0.4`, bootstrap image (vanilla Drupal, not the app repo) |
 | 10. Re-enable schedule | not started |
@@ -232,6 +232,20 @@ az storage account update --name <state account> \
 
 Doing this **before** `Storage Blob Data Contributor` has propagated locks you
 out of your own state.
+
+Done 2026-08-03. Check every consumer first — there is no shared-key fallback
+afterwards, and a CI-only consumer will not show up in a local test:
+
+- all five `terraform init` calls in `.github/workflows/` pass
+  `use_azuread_auth=true` (and `use_oidc=true`)
+- the `terraform_remote_state.secrets` data source in `production`, `devtest` and
+  `dev` passes `use_azuread_auth = var.use_azuread_auth`, which defaults to `true`
+- nothing sets `ARM_ACCESS_KEY` or a SAS token anywhere
+
+Verified afterwards by re-planning all three applied environments; each still
+reads its state and reports no drift. Note this hardens only the **state**
+account. The per-environment data storage accounts still mirror their access keys
+into Key Vault for the Drupal `key` module, which is a separate mechanism.
 
 ## 8. Create the app repository
 
