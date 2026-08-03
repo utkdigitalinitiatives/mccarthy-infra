@@ -11,8 +11,7 @@ Key Vault, not in a hidden file; everything else belongs in git.
 **Status: steps 1–5 executed 2026-07-31; step 9 attempted 2026-08-03.** `secrets`
 and `devtest` are applied and re-plan clean; `production` and `dev` have not been
 touched. Both runs hit rough edges and the fixes are folded in below — see
-`docs/TODO.md` for the ones still open, including the Defender for Storage
-singleton, which will recur on the production apply.
+`docs/TODO.md` for the ones still open.
 
 | Step | State |
 |---|---|
@@ -24,14 +23,20 @@ singleton, which will recur on the production apply.
 | 6. `environments/production` | not started — blocked on step 9 |
 | 7. Harden state account | not started |
 | 8. App repo wiring | not started — no `.github/` in `mccarthy-index` |
-| 9. First image build | in progress — see below |
+| 9. First image build | done — `0.0.4`, bootstrap image (vanilla Drupal, not the app repo) |
 | 10. Re-enable schedule | not started |
 
 **Nothing in this repository had ever run in CI before 2026-08-03.** The first
 three dispatches each failed on a different latent defect — OIDC subject format,
 Packer's build resource group, and a Drush-less Composer fallback — none of which
-were visible from reading the code. All three are written up in `docs/TODO.md`.
-Expect the same class of surprise from any step below that has never executed.
+were visible from reading the code. The fourth succeeded. All three are written
+up in `docs/TODO.md`. Expect the same class of surprise from any step below that
+has never executed.
+
+Each build also leaves an intermediate managed image (`mccarthy-rocky9-<version>`)
+in `lib-main-images-rg`. That is by design — Packer captures to a managed image
+before publishing to the gallery — but they accumulate one per build and nothing
+prunes them.
 
 ---
 

@@ -25,8 +25,13 @@ a resource with the ID ".../DefenderForStorageSettings/current" already exists -
 to be managed via Terraform this resource needs to be imported into the State.
 ```
 
-**This will recur on every new storage account** — production has not been
-applied yet and will hit it. Unblock with:
+**Production is NOT affected** — verified by plan on 2026-08-03, which creates 33
+resources and no `defender_for_storage` among them. The resource is `count`-gated
+on `disable_defender_for_storage`, which defaults to `false` and is set to `true`
+only in `environments/devtest/main.tf:117`. `dev` does not set it either.
+
+So this recurs on any storage account that *opts out* of Defender, not on every
+new one. Unblock with:
 
 ```bash
 terraform import 'module.blob_storage.azapi_resource.defender_for_storage[0]' \
