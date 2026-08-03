@@ -77,6 +77,49 @@ lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 
 ## Resolved
 
+### GitHub now issues an immutable OIDC subject, and Entra matched the old one
+
+**Found 2026-08-03 on the very first CI run — `Azure Login`, the first step that
+had ever exercised the service principal.**
+
+```
+AADSTS700213: No matching federated identity record found for presented
+assertion subject 'repo:utkdigitalinitiatives@11233454/mccarthy-infra@1316465775:ref:refs/heads/main'
+```
+
+The federated credentials said `repo:utkdigitalinitiatives/mccarthy-infra:...`.
+GitHub has started embedding the numeric org and repo IDs in the subject claim —
+an *immutable* identifier that survives a rename, where the name-based form
+silently stops matching after one. Entra does no wildcarding, so nothing matched
+and every OIDC-authenticating job would have failed the same way.
+
+The rollout is per-repository, not org-wide, and appears to track repo creation
+date. Confirm rather than assume:
+
+```bash
+gh api repos/<org>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix
+#   mccarthy-infra: repo:utkdigitalinitiatives@11233454/mccarthy-infra@1316465775
+#   lib-main-infra: repo:utkdigitalinitiatives/lib-main-infra
+```
+
+**lib-main-infra is on the old format and is unaffected** — but it is one repo
+rename away from the same failure, and its credentials would then need the same
+treatment.
+
+Note `use_immutable_subject` in that response reads `false` even for
+mccarthy-infra, which is misleading. `sub_claim_prefix` is the field that tells
+you what will actually be presented; trust it over the flag.
+
+**Fix:** `bootstrap/azure-setup.sh` now reads the prefix from that endpoint
+instead of composing `repo:<org>/<repo>` itself, falling back to the old form
+with a warning if the call fails. `add_federated_credential` also reconciles on
+*subject* rather than merely checking that the name exists, so re-running the
+script repairs an already-bootstrapped project instead of reporting `exists:`
+and leaving it broken. That is the case that matters: the format changing under
+a working deployment is precisely when someone re-runs the script.
+
+---
+
 ### PostgreSQL client on the runner was older than the server — broke the first DB sync
 
 **Filed 2026-07-30, fixed 2026-07-31. Never hit in practice; nothing had been

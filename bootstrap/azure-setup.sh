@@ -194,16 +194,57 @@ fi
 SP_OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
 echo "SP object ID: $SP_OBJECT_ID"
 
-# Subjects must match exactly what GitHub presents.
+# Subjects must match exactly what GitHub presents -- Entra does no wildcarding.
 #   - repository_dispatch and schedule events always run on the DEFAULT BRANCH,
 #     so the refs/heads/main subject is what the deploy pipelines actually use.
 #   - the environment: subjects cover jobs that declare `environment:`.
+#
+# The prefix is NOT always "repo:<org>/<repo>". GitHub has begun issuing
+# immutable subject claims that embed the numeric org and repo IDs, e.g.
+# "repo:utkdigitalinitiatives@11233454/mccarthy-infra@1316465775", which survive
+# a rename where the name-based form does not. mccarthy-infra gets the immutable
+# form and the older lib-main-infra does not, so this cannot be hardcoded either
+# way -- ask GitHub what it will actually present. Guessing wrong costs you a
+# failed run and an AADSTS700213 that names the subject it wanted.
+SUB_PREFIX=$(gh api "repos/${GITHUB_ORG}/${INFRA_REPO}/actions/oidc/customization/sub" \
+  --jq '.sub_claim_prefix // empty' 2>/dev/null)
+if [ -z "$SUB_PREFIX" ]; then
+  SUB_PREFIX="repo:${GITHUB_ORG}/${INFRA_REPO}"
+  echo "warn:    could not read the OIDC subject prefix from GitHub; assuming $SUB_PREFIX"
+else
+  echo "OIDC subject prefix: $SUB_PREFIX"
+fi
+
 add_federated_credential() {
-  local name="$1" subject="$2"
-  if az ad app federated-credential show --id "$APP_ID" --federated-credential-id "$name" >/dev/null 2>&1; then
+  local name="$1" subject="$2" current
+  # Match on name but reconcile on subject. The subject IS the credential; a
+  # stale one is not a harmless leftover, it fails every single run. Checking
+  # only for existence would leave an already-bootstrapped project broken after
+  # GitHub changes the claim format, which is exactly when you re-run this.
+  current=$(az ad app federated-credential show \
+    --id "$APP_ID" --federated-credential-id "$name" \
+    --query subject -o tsv 2>/dev/null || true)
+
+  if [ "$current" = "$subject" ]; then
     echo "exists:  federated credential $name"
     return
   fi
+
+  if [ -n "$current" ]; then
+    az ad app federated-credential update \
+      --id "$APP_ID" --federated-credential-id "$name" --parameters "{
+      \"name\": \"$name\",
+      \"issuer\": \"https://token.actions.githubusercontent.com\",
+      \"subject\": \"$subject\",
+      \"description\": \"GitHub Actions OIDC for $GITHUB_ORG/$INFRA_REPO\",
+      \"audiences\": [\"api://AzureADTokenExchange\"]
+    }" --output none
+    echo "updated: federated credential $name"
+    echo "           was: $current"
+    echo "           now: $subject"
+    return
+  fi
+
   az ad app federated-credential create --id "$APP_ID" --parameters "{
     \"name\": \"$name\",
     \"issuer\": \"https://token.actions.githubusercontent.com\",
@@ -215,10 +256,10 @@ add_federated_credential() {
 }
 
 banner "Federated credentials"
-add_federated_credential "github-main"        "repo:${GITHUB_ORG}/${INFRA_REPO}:ref:refs/heads/main"
-add_federated_credential "github-env-prod"    "repo:${GITHUB_ORG}/${INFRA_REPO}:environment:production"
-add_federated_credential "github-env-dev"     "repo:${GITHUB_ORG}/${INFRA_REPO}:environment:dev"
-add_federated_credential "github-pull-request" "repo:${GITHUB_ORG}/${INFRA_REPO}:pull_request"
+add_federated_credential "github-main"        "${SUB_PREFIX}:ref:refs/heads/main"
+add_federated_credential "github-env-prod"    "${SUB_PREFIX}:environment:production"
+add_federated_credential "github-env-dev"     "${SUB_PREFIX}:environment:dev"
+add_federated_credential "github-pull-request" "${SUB_PREFIX}:pull_request"
 
 # --- Role assignments ---------------------------------------------------------
 #
