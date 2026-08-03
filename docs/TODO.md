@@ -71,6 +71,31 @@ production's 8.3.
 
 ---
 
+### Nothing prunes images in the shared resource group
+
+**Observed 2026-08-03.** Pre-existing and mostly lib-main's, but mccarthy now
+contributes to it, so it is recorded here rather than only in lib-main-infra.
+
+`lib-main-images-rg` holds **89 intermediate managed images** (81 `drupal-rocky9-*`,
+7 `drupal-base-rocky9-*`, 1 `mccarthy-rocky9-*`), each declaring a 64 GB OS disk,
+plus **80 gallery versions** under `drupal-rocky-linux-9`. Both grow by one per
+build and neither is ever cleaned up.
+
+The intermediate managed image is a Packer implementation detail — it captures to
+a managed image, then publishes that into the gallery. Once the gallery version
+exists the managed image has no consumer, so all of the old ones are dead weight.
+Gallery versions are at least defensible for rollback; 80 is not.
+
+Billing is on used capacity, not the provisioned 64 GB, so the real cost is well
+below what the raw numbers suggest — worth measuring before acting.
+
+Not fixed here because deleting image history is not this project's call, and any
+prune has to account for which versions running VMSS instances are pinned to.
+`az vmss show --query virtualMachineProfile.storageProfile.imageReference.id`
+before deleting anything.
+
+---
+
 ### lib-main must move off `10.0.0.0/16` before it goes live
 
 Not this repo's change, but it constrains the shared Solr plan and is recorded
