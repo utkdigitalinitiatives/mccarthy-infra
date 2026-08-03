@@ -24,7 +24,7 @@ touched. Both runs hit rough edges and the fixes are folded in below — see
 | 7. Harden state account | done — `allowSharedKeyAccess: false` |
 | 8. App repo wiring | not started — no `.github/` in `mccarthy-index` |
 | 9. First image build | done — `0.0.4`, bootstrap image (vanilla Drupal, not the app repo) |
-| 10. Re-enable schedule | not started |
+| 10. Re-enable schedule | done — active since 2026-08-03 |
 
 Production came up on 2026-08-03 and works end to end: the VMSS booted from
 `0.0.4`, cloud-init installed Drupal, and Let's Encrypt issued a real certificate
@@ -332,6 +332,35 @@ against resources that did not exist yet. Once production is applied:
 ```bash
 gh workflow enable "Production Start/Stop Schedule"
 ```
+
+Done 2026-08-03. What it commits you to, since the cron is easy to misread:
+
+| Cron (UTC) | Action | Eastern |
+|---|---|---|
+| `30 11 * * 1-5` | start | 07:30 EDT / 06:30 EST |
+| `30 22 * * 1-5` | stop | 18:30 EDT / 17:30 EST |
+
+**GitHub cron is always UTC, so the local window shifts an hour across DST.** If
+the site must be up by a fixed local time year-round, the cron needs adjusting
+twice a year — nothing here does that automatically.
+
+**Weekdays only.** Production is deallocated from Friday evening until Monday
+morning. That is the intent for a cost-managed environment, but `libtest1` is
+publicly resolvable, so anyone hitting it over a weekend gets nothing. Decide
+deliberately before this fronts anything user-facing.
+
+`ACTION` falls through to `stop` for any trigger that is not the start cron. That
+biases toward not running rather than toward burning money, which is the right
+default — but it does mean editing the start cron string without also editing the
+`ACTION` expression in the job's `env:` silently converts the morning start into a
+second stop.
+
+Every cold start re-runs the cloud-init ceremony — see "Auto-stop wake-up race" in
+the rough-edges table. Harmless at one instance; revisit before scaling out.
+
+Note also that GitHub disables scheduled workflows automatically after 60 days
+with no repository activity, and may delay scheduled runs under load. Neither is
+a correctness problem here, but a missed start is a missed start.
 
 The other four workflows are event-triggered and safe to leave active — nothing
 dispatches to them until the app repo exists.
