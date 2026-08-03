@@ -20,11 +20,19 @@ touched. Both runs hit rough edges and the fixes are folded in below — see
 | 3. `environments/secrets` | applied — Key Vault `mccarthy-kv-553468f1` |
 | 4. Manual Key Vault secrets | done — all three seeded |
 | 5. `environments/devtest` | applied — PostgreSQL 18, `mccdevtesth6srb8na` |
-| 6. `environments/production` | not started — blocked on step 9 |
+| 6. `environments/production` | applied — both passes, re-plans clean; serving on libtest1 |
 | 7. Harden state account | not started |
 | 8. App repo wiring | not started — no `.github/` in `mccarthy-index` |
 | 9. First image build | done — `0.0.4`, bootstrap image (vanilla Drupal, not the app repo) |
 | 10. Re-enable schedule | not started |
+
+Production came up on 2026-08-03 and works end to end: the VMSS booted from
+`0.0.4`, cloud-init installed Drupal, and Let's Encrypt issued a real certificate
+for `libtest1.lib.utk.edu` over HTTP-01 (valid to 2026-11-01, renewed by
+`certbot-renew.timer` with a deploy hook that re-uploads to the `tls-certs`
+container). `https://libtest1.lib.utk.edu/health` returns 200 against a publicly
+trusted chain. **The site it serves is vanilla Drupal 11, not the Cormac Index** —
+that waits on step 8.
 
 **Nothing in this repository had ever run in CI before 2026-08-03.** The first
 three dispatches each failed on a different latent defect — OIDC subject format,
