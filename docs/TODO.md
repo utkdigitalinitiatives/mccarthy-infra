@@ -77,6 +77,33 @@ lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 
 ## Resolved
 
+### The Composer fallback built an image with no Drush in it
+
+**Found 2026-08-03 on the third CI run.**
+
+`drupal/recommended-project` does not bundle Drush. The Ansible playbook's
+app-repo path gets it from the project's own `composer.lock`, but the
+`composer create-project` fallback — the path that exists specifically so the
+first image can be built before the app repo is wired — never asked for it. The
+build got as far as symlinking:
+
+```
+fatal: [default]: FAILED! => {"msg": "src file does not exist, use 'force=yes'
+  if you really want to create the link: /var/www/drupal/vendor/bin/drush"}
+```
+
+Cloud-init drives the whole site install through Drush (`site:install`, the UUID
+overwrite, `config:import`, `updatedb`, `cache:rebuild`), so an image without it
+is inert. Fixed with an explicit `composer require drush/drush` guarded to the
+fallback path.
+
+This is the general hazard with that fallback: it is the only path nobody ever
+exercises, so it rots silently. `mccarthy-index` does declare `drush/drush ^13.7`,
+so the clone path was never affected — but an app repo that omitted it would fail
+at exactly the same task with exactly the same message.
+
+---
+
 ### Packer wanted a subscription-scope resource group the SP cannot create
 
 **Found 2026-08-03 on the second CI run, once the OIDC fix below let it get far
@@ -156,6 +183,40 @@ with a warning if the call fails. `add_federated_credential` also reconciles on
 script repairs an already-bootstrapped project instead of reporting `exists:`
 and leaving it broken. That is the case that matters: the format changing under
 a working deployment is precisely when someone re-runs the script.
+
+---
+
+### A JSON boolean in `client_payload` walked straight past a workflow guard
+
+**Introduced and fixed 2026-08-03, caught in review before it ever ran.**
+
+`bootstrap_build` gates whether `build-on-dispatch.yml` stops after the image or
+carries on into `prepare-database`, `sync-blob-storage` and `deploy-dev`. The
+first version of the guard compared `github.event.client_payload.bootstrap_build`
+directly against `'true'` at job level. That is only correct if the caller sends a
+**string**.
+
+GitHub coerces mismatched types to numbers before comparing. A JSON boolean
+`true` casts to 1; the string `'true'` casts to NaN; `1 != NaN` is **true**. So
+`{"bootstrap_build": true}` — the natural way to write it, and what `gh api -F`
+produces — built the vanilla image and then ran the downstream jobs anyway. The
+shell test in the validate step could not catch it either: `${{ }}` stringifies
+both forms to `true` before the shell ever sees them.
+
+During a genuine first bootstrap those jobs merely fail against resources that do
+not exist. The bite comes later: an image-only rebuild once the environments are
+up would `DROP DATABASE` / `CREATE DATABASE` on devtest and then deploy vanilla
+Drupal to the dev VM — precisely what the flag exists to prevent.
+
+**Fix:** the validate step normalises the flag to a string once and publishes it
+as a job output; the three downstream jobs gate on
+`needs.build-image.outputs.bootstrap`. Job outputs are always strings, so the
+comparison is exact whatever the caller sends.
+
+**Never compare `client_payload` fields directly in an `if:`.** Route them
+through a job output, or through `env:` and a shell test, where the types are
+knowable. Use `gh api -f` (string) rather than `-F` (magic type conversion) when
+dispatching by hand.
 
 ---
 

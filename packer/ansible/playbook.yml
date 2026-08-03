@@ -46,6 +46,22 @@
         COMPOSER_HOME: "/tmp/composer-{{ drupal_user }}"
       when: drupal_repo | default('') | length == 0
 
+    # drupal/recommended-project does not bundle Drush, and the app repo's own
+    # composer.lock is what supplies it on the clone path. The fallback has to ask
+    # for it explicitly or the symlink task below fails with "src file does not
+    # exist" -- cloud-init drives the entire site install through drush, so an
+    # image without it is useless.
+    - name: Add Drush to the scaffolded project (fallback only)
+      ansible.builtin.command:
+        cmd: /usr/local/bin/composer require drush/drush --no-interaction
+        chdir: "{{ web_root }}"
+        creates: "{{ web_root }}/vendor/bin/drush"
+      become: true
+      become_user: "{{ drupal_user }}"
+      environment:
+        COMPOSER_HOME: "/tmp/composer-{{ drupal_user }}"
+      when: drupal_repo | default('') | length == 0
+
     # ==========================================================================
     # Install dependencies from composer.lock (when cloning the app repo)
     # ==========================================================================

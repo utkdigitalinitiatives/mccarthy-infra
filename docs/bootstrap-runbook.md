@@ -8,11 +8,11 @@ operational notes in `.git/info/exclude`, which is a local-only mechanism, so
 the runbook exists on exactly one laptop. Anything genuinely secret belongs in
 Key Vault, not in a hidden file; everything else belongs in git.
 
-**Status: steps 1–5 executed 2026-07-31.** `secrets` and `devtest` are applied and
-re-plan clean; `production` and `dev` have not been touched. The first run did hit
-rough edges, and the fixes are folded in below — see `docs/TODO.md` for the two
-that are still open, one of which (the Defender for Storage singleton) will recur
-on the production apply.
+**Status: steps 1–5 executed 2026-07-31; step 9 attempted 2026-08-03.** `secrets`
+and `devtest` are applied and re-plan clean; `production` and `dev` have not been
+touched. Both runs hit rough edges and the fixes are folded in below — see
+`docs/TODO.md` for the ones still open, including the Defender for Storage
+singleton, which will recur on the production apply.
 
 | Step | State |
 |---|---|
@@ -21,7 +21,17 @@ on the production apply.
 | 3. `environments/secrets` | applied — Key Vault `mccarthy-kv-553468f1` |
 | 4. Manual Key Vault secrets | done — all three seeded |
 | 5. `environments/devtest` | applied — PostgreSQL 18, `mccdevtesth6srb8na` |
-| 6+ | not started |
+| 6. `environments/production` | not started — blocked on step 9 |
+| 7. Harden state account | not started |
+| 8. App repo wiring | not started — no `.github/` in `mccarthy-index` |
+| 9. First image build | in progress — see below |
+| 10. Re-enable schedule | not started |
+
+**Nothing in this repository had ever run in CI before 2026-08-03.** The first
+three dispatches each failed on a different latent defect — OIDC subject format,
+Packer's build resource group, and a Drush-less Composer fallback — none of which
+were visible from reading the code. All three are written up in `docs/TODO.md`.
+Expect the same class of surprise from any step below that has never executed.
 
 ---
 
@@ -325,3 +335,13 @@ Carried forward as warnings because they will bite the same way here.
 | Media SAS expiry | `media_sas_expiry` is a hard date. Media stops being served when it lapses. Put it on a calendar. |
 | Base image drift | The shared base is rebuilt monthly by lib-main-infra. Set `BASE_IMAGE_VERSION` to pin. |
 | PostgreSQL major changes | Change `PG_MAJOR` and the Terraform default together. It pins both the server and the runner's `pg_dump`; a client older than the server cannot dump it at all. |
+
+## Things this project found first
+
+Not inherited — these surfaced here and lib-main has not hit them yet.
+
+| Issue | Where it bites |
+|---|---|
+| OIDC subject format | mccarthy-infra is issued the *immutable* subject claim (`repo:org@ID/repo@ID:...`); lib-main-infra still gets the name-based form. **lib-main is one repo rename away from the same `AADSTS700213`**, and its federated credentials would then need the same treatment. Read the truth from `gh api repos/<org>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix` — not from `use_immutable_subject`, which reads `false` even where the immutable form is in use. |
+| Narrow SP scope vs. Packer | Contributor on five named resource groups means Packer cannot create its default throwaway build RG, and reports the authorization failure as "a resource group with that name already exists". Set `build_resource_group_name`. lib-main never sees this because its SP is a subscription-wide Contributor. |
+| The Composer fallback rots | It is the one path nobody exercises. It shipped without Drush. Anything cloud-init needs must be explicitly required there, not assumed from the app repo's `composer.lock`. |
