@@ -250,25 +250,39 @@ into Key Vault for the Drupal `key` module, which is a separate mechanism.
 ## 8. Create the app repository
 
 The app repo is `utkdigitalinitiatives/mccarthy-index` (already created by the dev
-team, cloned to `~/projects/mccarthy-index`). It has **no `.github/` directory**,
-so nothing dispatches to this repo yet and the pipeline cannot be exercised end
-to end. See the README's "Contract the app repo must satisfy" for what it needs.
+team, cloned to `~/projects/mccarthy-index`). See the README's "Contract the app
+repo must satisfy" for what it needs.
 
-Open items on the app-repo side, as of 2026-07-30:
+**This step is in progress, not done. `docs/TODO.md` carries the authoritative
+per-item state** — read it before touching anything here. Summary as of
+2026-08-04:
 
-- no dispatch workflows and no dev-to-main branch guard
-- no `dev` branch; only `main`
-- no root `.gitignore`, so `vendor/` and `web/core/` are one `git add -A` from
-  being committed
-- no `az_blob_fs`; `system.file:default_scheme` is `public`, which on a VMSS is
-  local disk wiped by every reimage
+- **the repo went public**, so the Packer clone needs no credential. A future
+  private app repo would; the TODO entry explains why the obvious fix bakes a
+  token into the published image.
+- **dispatch is wired.** Reused lib-main's `lib-dispatch` App (ID `2828711`)
+  rather than registering a new one, added `mccarthy-infra` to its selected-repo
+  list, and set `vars.DISPATCH_APP_ID` + `secrets.DISPATCH_APP_PRIVATE_KEY` **on
+  the app repo**, not here. `mccarthy-index` commit `bb2ea88` adds
+  `dispatch-dev-merge.yml` and `dev-to-main.yml`.
+- **the App needs `contents: write` + `metadata: read`.** An earlier version of
+  this runbook said `contents: read`; that is wrong.
+  `POST /repos/.../dispatches` requires Contents *write* for App and
+  fine-grained tokens, so an App built to the old spec 403s on its first
+  dispatch.
+- **`dispatch-main-merge.yml` is written but deliberately not committed.**
+  Committing it to `main` fires it on that same push and would trigger a
+  first-ever unattended production deploy. Create the `production` GitHub
+  environment with a required reviewer first — no environments exist today, so
+  the `environment:` keys in the deploy workflows currently enforce nothing.
+- **the dev team owns the `dev` branch and branch protection.** Until `dev`
+  exists nothing can dispatch, so that is what gates the first end-to-end run.
+- still open on the app-repo side: no root `.gitignore`; `az_blob_fs`/`key` not
+  required in `composer.json` nor listed in `core.extension.yml`; 6 Dependabot
+  alerts in `composer.lock` that a build would bake into the image.
 - DDEV declares PHP 8.4 against production's 8.3. Core only needs PHP >= 8.3, so
   this is a difference rather than a defect. PostgreSQL now matches at 18 on both
   sides, so local dumps restore into production cleanly.
-
-Register a GitHub App (or reuse lib-main's) with `contents: read` and
-`metadata: read` on this repo, install it on the app repo, and set
-`vars.DISPATCH_APP_ID` + `secrets.DISPATCH_APP_PRIVATE_KEY` there.
 
 ## 9. First image build
 
@@ -401,3 +415,7 @@ Not inherited — these surfaced here and lib-main has not hit them yet.
 | OIDC subject format | mccarthy-infra is issued the *immutable* subject claim (`repo:org@ID/repo@ID:...`); lib-main-infra still gets the name-based form. **lib-main is one repo rename away from the same `AADSTS700213`**, and its federated credentials would then need the same treatment. Read the truth from `gh api repos/<org>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix` — not from `use_immutable_subject`, which reads `false` even where the immutable form is in use. |
 | Narrow SP scope vs. Packer | Contributor on five named resource groups means Packer cannot create its default throwaway build RG, and reports the authorization failure as "a resource group with that name already exists". Set `build_resource_group_name`. lib-main never sees this because its SP is a subscription-wide Contributor. |
 | The Composer fallback rots | It is the one path nobody exercises. It shipped without Drush. Anything cloud-init needs must be explicitly required there, not assumed from the app repo's `composer.lock`. |
+| An unset repo variable is `""`, not null | `TF_VAR_x: ${{ vars.X }}` with `X` unset sets the env var to the **empty string**, and Terraform does not read that as `null`. Any `var.x == null` gate silently takes the wrong branch. Cost us every CI production deploy via `PUBLIC_IP_ID` before it was ever noticed, because `modules/load-balancer/main.tf:39` gates IP creation on `== null`. **lib-main uses the same pattern and is exposed wherever a `vars.` value is optional.** Grep for `== null` against anything sourced from `vars.`. |
+| A workflow triggers on the push that adds it | GitHub evaluates workflows from the pushed commit, so committing a new `on: push: branches: [main]` workflow **fires it immediately**. Adding a production-deploy dispatcher is therefore itself a production deploy. Land such files only when an unattended run is acceptable, or gate them behind an environment with a required reviewer. Corollary, observed 2026-08-07: **creating a branch also emits a `push` event**, but `paths-ignore` still applies — creating `dev` at `bb2ea88`, whose diff is entirely `.github/**`, triggered nothing. Do not rely on that for a branch cut from a commit that touches real files. |
+| `environment:` with no environment enforces nothing | GitHub auto-creates a missing environment on first use **with no protection rules**. `mccarthy-infra` declared `environment: production` in two deploy workflows while `total_count` was 0, so the approval gate everyone assumed existed did not. Check `gh api /repos/<org>/<repo>/environments` rather than trusting the workflow YAML. |
+| `$settings['file_default_scheme']` may be inert (**unverified**) | Cloud-init sets it in both projects, but Drupal 9+ reads the default scheme from `system.file:default_scheme` config, not `$settings`. If so, neither site's default scheme is actually `azblob` and both rely on per-field `uri_scheme`. Worth ten minutes on devtest; **applies to lib-main identically**. |

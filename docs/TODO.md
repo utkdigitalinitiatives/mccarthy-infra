@@ -61,47 +61,137 @@ be silently ignored.
 
 ---
 
-### App repo (`mccarthy-index`) is not wired to this pipeline
+### App repo (`mccarthy-index`) — step 8, partly wired, blocked on the dev team
 
 **This is the only remaining bootstrap step.** Steps 1–7, 9 and 10 are done;
 production is applied and serving. The README's "Contract the app repo must
-satisfy" is the authoritative list. State verified 2026-08-03 — the repo has not
-been touched since 2026-07-07.
+satisfy" is the authoritative list.
 
-**Gating decision: is `mccarthy-index` going public?** It is private today, and
-**no git credential is plumbed into Packer** — `var.drupal_repo` reaches
-`ansible.builtin.git` in `packer/ansible/playbook.yml` with nothing to
-authenticate with, so the clone fails against a private repo. Going public
-dissolves this; staying private means threading a token through
-`build-on-dispatch.yml` → Packer → the playbook. Nothing else in step 8 can be
-tested until one of those happens.
+**Progress as of 2026-08-04.** The dispatch plumbing is wired and the credential
+question is settled. What is left is one deliberate hold on our side and a branch
+setup owned by the dev team. **Nothing has fired end to end yet** — no image has
+ever been built from the app repo, `mccarthy-index` still carries only its
+2026-07-07 scaffold, and production still serves the vanilla Drupal baked into
+image `0.0.4`. Read the per-item state below rather than assuming.
 
-Infra-side work, once decided:
+**Gating decision resolved: `mccarthy-index` went PUBLIC on 2026-08-04.** The
+anonymous clone works and no git credential is needed; step 8 work is unblocked.
+Context, in case visibility ever flips back: **no git credential is plumbed into
+Packer** — `var.drupal_repo` reaches `ansible.builtin.git` in
+`packer/ansible/playbook.yml` with nothing to authenticate with, and the clone
+runs on the throwaway build VM, not the Actions runner, so the runner's
+`GITHUB_TOKEN` cannot help (wrong repo scope, wrong machine). A future private
+repo means either cloning on the runner and shipping the tree to the VM with a
+`file` provisioner (preferred — no secret can be baked into the image), or
+threading a short-lived token through `build-on-dispatch.yml` → Packer → the
+playbook and scrubbing `.git/config` before capture, because git persists the
+authenticated remote URL there.
 
-- token plumbing into Packer, if the repo stays private
-- a GitHub App with `contents: read` + `metadata: read` installed on the app
-  repo (or reuse lib-main's), supplying `vars.DISPATCH_APP_ID` and
-  `secrets.DISPATCH_APP_PRIVATE_KEY` **there**, not here
-- `deploy-on-main-merge.yml` listens for `drupal-main-merge` and has never fired
+Infra-side work:
+
+- **DONE 2026-08-04 — GitHub App.** Reused lib-main's `lib-dispatch` rather than
+  registering a new one: app ID `2828711`, installation `109025518` on the org,
+  `repository_selection: selected`. `mccarthy-infra` was added to that selected
+  list, and `vars.DISPATCH_APP_ID` + `secrets.DISPATCH_APP_PRIVATE_KEY` are set on
+  **`mccarthy-index`**, not here. Verified by minting a token scoped to
+  `mccarthy-infra` — a 422 is what "repo not in the installation" looks like.
+  **The App holds `contents: write` + `metadata: read`, and write is required**:
+  `POST /repos/.../dispatches` needs Contents *write* for App and fine-grained
+  tokens. The runbook said `contents: read`; a new App built to that spec would
+  403 on its first dispatch. That is now corrected in
+  `docs/bootstrap-runbook.md`.
+- **DONE 2026-08-04 — `PUBLIC_IP_ID` repo variable.** It was never set, and it is
+  consumed by both `deploy-production.yml` and `deploy-on-main-merge.yml`. Unset,
+  GitHub passes `TF_VAR_public_ip_id=""`, and **an empty string is not `null`**:
+  `modules/load-balancer/main.tf:39` gates IP creation on `== null`, so Terraform
+  would neither create an IP nor reuse the real one, and would pass `""` as the
+  frontend IP. Every production deploy through CI would have failed. Set to the
+  `libtest1` resource in `dns-test-rg`, verified against the live LB frontend.
+  `LB_DNS_LABEL` is still unset and that is correct — `main.tf:173` forces
+  `dns_label = null` whenever `public_ip_id` is set.
+- **`deploy-on-main-merge.yml` has still never fired**, and `environments/dev/`
+  has never been applied. Expect first-run defects; see the CI note at the bottom
+  of this file.
+- **No GitHub environment exists — `total_count` is 0.** `deploy-production.yml`
+  and `deploy-on-main-merge.yml` both declare `environment: production` and
+  `build-on-dispatch.yml` declares `environment: dev`, but GitHub auto-creates an
+  environment on first use with **no protection rules**, so all three are
+  currently decorative. Create `production` with a required reviewer before the
+  main-merge path goes live, or a dev→main merge deploys production unattended.
 
 App-repo side:
 
-- no `.github/` at all — needs both dispatch workflows, `paths-ignore` for docs,
-  and a retry around the `gh api` call (lib-main lost a pipeline run to a silent
-  server-side dispatch failure)
-- no `dev` branch; only `main`, and the flow is `topic → dev → main`
-- no root `.gitignore`, so `vendor/` and `web/core/` are one `git add -A` away
+- **PARTLY DONE 2026-08-04 — workflows.** `mccarthy-index` commit `bb2ea88` adds
+  `dispatch-dev-merge.yml` (push to `dev`, with `paths-ignore` and a 5-attempt
+  retry) and `dev-to-main.yml` (fails PRs into `main` from any head but `dev`).
+  Both carry an `if: failure()` step that opens — or comments on — an issue
+  holding the exact re-dispatch command, because lib-main lost a pipeline run to a
+  silent server-side dispatch failure that nobody noticed. Adapted from
+  `lib-main`'s equivalents, which have neither the retry nor the alert.
+- **HELD BACK DELIBERATELY — `dispatch-main-merge.yml`.** It is written and
+  `actionlint`-clean but sits **untracked** in `~/projects/mccarthy-index`. It has
+  not been committed because **`on: push: branches: [main]` fires on the very push
+  that adds the file** — GitHub evaluates workflows from the pushed commit — so
+  committing it immediately triggers a first-ever, unattended, unreviewed
+  production deploy. Land it only once the `production` environment has a required
+  reviewer. It deliberately carries no `paths-ignore`, unlike the dev dispatch,
+  because the main-merge event also destroys the dev VM and skipping a docs-only
+  merge would leave that VM running and billing.
+- **DONE 2026-08-07 — `dev` branch created** at `bb2ea88`, same tip as `main`.
+  Creating it emitted a `push` event on `dev` but triggered nothing, because that
+  commit's diff is entirely `.github/**`, which `dispatch-dev-merge.yml` lists in
+  `paths-ignore`. **The next push to `dev` that touches real files is the first
+  end-to-end pipeline run** — Packer build, `DROP`/`CREATE` on the devtest
+  database, blob sync, and the first-ever apply of `environments/dev/`. Expect
+  first-run defects.
+- **Still open — branch protection**, deliberately deferred 2026-08-07. `main` is
+  unprotected, so `dev-to-main.yml` runs but nothing requires it to pass, and
+  nothing stops a direct push to `main`. The flow is `topic → dev → main`.
+- still no root `.gitignore`, so `vendor/` and `web/core/` are one `git add -A`
+  away
+- **6 open Dependabot alerts, all `guzzlehttp/guzzle`** (1 high, 5 moderate).
+  They live in `composer.lock`, which the Packer build installs with
+  `composer install --no-dev`, so they would be baked into the production image. A
+  `composer update guzzlehttp/guzzle` on `dev` clears all six and makes a good
+  first exercise of the pipeline: a real change, a verifiable outcome, nothing
+  else riding on it.
 
-**Most likely to bite on the first real deploy:** `composer.json` requires
-**neither `drupal/az_blob_fs` nor `drupal/key`**, and neither appears in
-`config/core.extension.yml`. Cloud-init nonetheless writes
+**Blob storage is not wired into the app repo — and the earlier framing of this
+was wrong.** Re-checked 2026-08-04. `composer.json` requires **neither
+`drupal/az_blob_fs` nor `drupal/key`**, and neither appears in
+`config/core.extension.yml`, while cloud-init unconditionally writes
 `$settings['file_default_scheme'] = 'azblob'`,
 `$config['az_blob_fs.settings'][...]` and `$config['key.key.azure_blob_key'][...]`
-into `settings.php` unconditionally. The repo has `media`, `media_library`,
-`image` and `file` enabled, so it does handle files. Adding config is not enough —
-**the modules have to be required in `composer.json` first**, or Drupal is pointed
-at a stream wrapper that does not exist. `config/system.file.yml` still says
-`default_scheme: public`, which on a VMSS is local disk wiped by every reimage.
+into `settings.php`.
+
+This entry used to say it was "most likely to bite on the first real deploy." It
+is not, and the mechanism matters:
+
+- `drush en key az_blob_fs` appears **only in cloud-init's fresh-install branch**
+  (`environments/production/cloud-init.tftpl:294`). Production is already
+  installed, so a reimage takes the *update* branch — `updatedb` →
+  `config:import` — which never runs `drush en`. Module state comes entirely from
+  `config/core.extension.yml`. **Listing the modules there is what enables them;
+  requiring them in `composer.json` only puts the code on disk.** Both are needed.
+- `mccarthy-index` **has no file or image fields at all** — 18 node field
+  storages, all text/date/taxonomy, no media types, and no `uri_scheme` anywhere
+  in `config/`. Compare `lib-main`, which sets `uri_scheme: azblob` on all five of
+  its file field storages. So the first deploy has nothing to store and will not
+  break.
+
+The real trigger is **the day someone adds an image or file field to `record`**:
+files then land on VMSS local disk and are wiped by the next reimage, silently.
+Cheap now, expensive later. Fix is `composer require drupal/az_blob_fs:^3.0
+drupal/key:>=1.15` (the versions lib-main runs), both modules added to
+`core.extension.yml`, and `az_blob_fs.settings.yml` + `key.key.azure_blob_key.yml`
+exported as empty shells for cloud-init's `$config` overrides to land on — a
+`$config` override does nothing if the config entity it targets does not exist.
+Copy lib-main's.
+
+**Unverified, worth ten minutes on devtest:** cloud-init sets
+`$settings['file_default_scheme']`, but Drupal 9+ reads the default scheme from
+`system.file:default_scheme` config, not from `$settings`. That line may be inert
+in **both** this project and lib-main.
 
 Not a defect, just a difference: DDEV declares PHP 8.4 against production's 8.3.
 Core needs >= 8.3. PostgreSQL matches at 18 on both sides since 2026-07-31.

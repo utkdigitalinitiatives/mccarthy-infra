@@ -207,16 +207,17 @@ name — all are derived from `PROJECT_NAME` or read from a variable.
 
 ## Contract the app repo must satisfy
 
-`mccarthy-index` exists but has no `.github/` directory at all, so nothing
-currently dispatches to this repo. It must implement the following before any
-pipeline here can fire.
+`mccarthy-index` is public and partly wired: as of commit `bb2ea88` it dispatches
+on pushes to `dev` and guards PRs into `main`. It cannot fire yet, because the
+`dev` branch does not exist. The table below is the full contract; see
+`docs/TODO.md` for which rows are already satisfied.
 
 | Item | Value |
 |---|---|
 | Branch flow | `topic → dev → main`; PRs into `main` only from `dev` |
 | On push to `dev` | dispatch `drupal-dev-merge` to `mccarthy-infra` with `client_payload[drupal_repo]` (clone URL), `[drupal_ref]=dev`, `[drupal_sha]` |
 | On push to `main` | dispatch `drupal-main-merge` with `client_payload[drupal_sha]` |
-| Auth | GitHub App token via `actions/create-github-app-token`, scoped `repositories: mccarthy-infra`; `vars.DISPATCH_APP_ID` + `secrets.DISPATCH_APP_PRIVATE_KEY` |
+| Auth | GitHub App token via `actions/create-github-app-token`, scoped `repositories: mccarthy-infra`; `vars.DISPATCH_APP_ID` + `secrets.DISPATCH_APP_PRIVATE_KEY`. Uses lib-main's `lib-dispatch` App (ID `2828711`), which must hold **`contents: write`** — the dispatch endpoint requires write, not read — and must list `mccarthy-infra` in its selected repositories. Both done 2026-08-04. |
 | Config sync dir | `config/` at project root (`$settings["config_sync_directory"] = "../config"`) |
 | Left empty in the repo | `$databases = []` and `$settings["hash_salt"] = ""` — infra injects both at boot |
 | Site UUID | already set: `542dcd94-b092-493d-9561-7361fe4c34bd` in `config/system.site.yml`. Never re-generate — a reinstall+re-export changes it and breaks production config import. |
