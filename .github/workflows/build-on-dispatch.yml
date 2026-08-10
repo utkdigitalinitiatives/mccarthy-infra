@@ -304,16 +304,28 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq "postgresql-client-${PG_MAJOR}"
 
-          # Production and devtest share one admin password today, so one fetch.
+          # The two servers have SEPARATE admin passwords. An earlier version of
+          # this step fetched production's and used it for both, which failed the
+          # first end-to-end run on 2026-08-10 with "password authentication
+          # failed for user drupaladmin" against devtest -- after the production
+          # dump had already succeeded, which is what made it look like a devtest
+          # outage rather than a credential mix-up. bootstrap-runbook.md has
+          # always generated two secrets; only this step assumed otherwise.
           KV_NAME=$(az keyvault list -g "$SECRETS_RG" --query "[0].name" -o tsv)
-          DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \
+          PROD_DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \
             --name production-db-admin-password --query value -o tsv)
-          echo "::add-mask::$DB_PASSWORD"
-          export PGPASSWORD="$DB_PASSWORD"
+          DEVTEST_DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \
+            --name devtest-db-admin-password --query value -o tsv)
+          echo "::add-mask::$PROD_DB_PASSWORD"
+          echo "::add-mask::$DEVTEST_DB_PASSWORD"
 
           echo "Dumping production database..."
-          pg_dump -h "$PROD_HOST" -U "$DB_USER" -d "$DB_NAME" \
+          PGPASSWORD="$PROD_DB_PASSWORD" \
+            pg_dump -h "$PROD_HOST" -U "$DB_USER" -d "$DB_NAME" \
             --format=custom --no-owner --no-acl -f /tmp/production.dump
+
+          # Everything below targets devtest, so switch credentials once here.
+          export PGPASSWORD="$DEVTEST_DB_PASSWORD"
 
           echo "Terminating existing connections to the devtest database..."
           psql -h "$DEVTEST_HOST" -U "$DB_USER" -d postgres \

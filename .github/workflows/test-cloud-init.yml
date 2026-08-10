@@ -187,15 +187,23 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq "postgresql-client-${PG_MAJOR}"
 
+          # Production and devtest have SEPARATE admin passwords -- same defect
+          # and same fix as build-on-dispatch.yml; see the fuller comment there.
           KV_NAME=$(az keyvault list -g "$SECRETS_RG" --query "[0].name" -o tsv)
-          DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \
+          PROD_DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \
             --name production-db-admin-password --query value -o tsv)
-          echo "::add-mask::$DB_PASSWORD"
-          export PGPASSWORD="$DB_PASSWORD"
+          DEVTEST_DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \
+            --name devtest-db-admin-password --query value -o tsv)
+          echo "::add-mask::$PROD_DB_PASSWORD"
+          echo "::add-mask::$DEVTEST_DB_PASSWORD"
 
           echo "Dumping production database..."
-          pg_dump -h "$PROD_HOST" -U "$DB_USER" -d "$DB_NAME" \
+          PGPASSWORD="$PROD_DB_PASSWORD" \
+            pg_dump -h "$PROD_HOST" -U "$DB_USER" -d "$DB_NAME" \
             --format=custom --no-owner --no-acl -f /tmp/production.dump
+
+          # Everything below targets devtest, so switch credentials once here.
+          export PGPASSWORD="$DEVTEST_DB_PASSWORD"
 
           echo "Terminating existing connections..."
           psql -h "$DEVTEST_HOST" -U "$DB_USER" -d postgres \
