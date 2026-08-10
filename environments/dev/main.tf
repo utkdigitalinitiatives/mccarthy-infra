@@ -132,23 +132,29 @@ data "azurerm_storage_account_sas" "media_read" {
 
 # Resource group for dev resources.
 #
-# Unlike the other stacks this one CREATES its resource group rather than
-# reading it, because the dev stack is destroyed and recreated on every
-# promotion to main. bootstrap/azure-setup.sh still pre-creates
-# <project>-dev-rg and scopes the CI service principal to it; Terraform adopts
-# the name on first apply. The per-PR variant is ephemeral by design.
-resource "azurerm_resource_group" "dev" {
-  name     = var.pr_number != null ? "${var.project_name}-dev-pr-${var.pr_number}-rg" : "${var.project_name}-dev-rg"
-  location = var.location
-
-  tags = {
-    Environment = "dev"
-    PRNumber    = var.pr_number != null ? var.pr_number : "none"
-    ManagedBy   = "terraform"
-    Project     = var.project_name
-    Ephemeral   = var.pr_number != null ? "true" : "false"
-    CostCenter  = var.cost_center
-  }
+# READ, not created -- same as the production and devtest stacks.
+#
+# This block used to CREATE the group, inherited from lib-main where that is
+# correct: lib-main-github-actions holds Contributor at subscription scope, so
+# it can create and destroy resource groups at will. mccarthy's SP deliberately
+# does not -- it holds Contributor on five named groups and nothing wider (see
+# the Packer entry in docs/TODO.md, which is the same asymmetry in a different
+# place). Production and devtest were converted to data sources for that reason;
+# dev was missed because it had never been applied. The first apply, on
+# 2026-08-10, failed with "a resource with the ID .../mccarthy-dev-rg already
+# exists - to be managed via Terraform this resource needs to be imported".
+#
+# Importing it instead would be worse than leaving it broken. cleanup-dev runs
+# an UNTARGETED `terraform destroy` on this stack after every promotion to main,
+# so an imported group would be deleted -- and deleting it also deletes the SP's
+# Contributor assignment scoped to it, which the SP cannot regrant itself. Dev
+# would then be unrecoverable without PIM Owner re-running bootstrap.
+#
+# Destroy still tears down everything inside the group, which is where the cost
+# is; only the empty shell and its role assignment survive. bootstrap creates
+# and owns the group.
+data "azurerm_resource_group" "dev" {
+  name = "${var.project_name}-dev-rg"
 }
 
 # Dev VM (validation stage)
@@ -158,7 +164,7 @@ module "dev_vm" {
   project_name         = var.project_name
   environment          = "dev"
   pr_number            = var.pr_number
-  resource_group_name  = azurerm_resource_group.dev.name
+  resource_group_name  = data.azurerm_resource_group.dev.name
   location             = var.location
   subnet_id            = var.subnet_id
   source_image_id      = data.azurerm_shared_image_version.drupal.id
