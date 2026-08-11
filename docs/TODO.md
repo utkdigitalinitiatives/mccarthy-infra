@@ -235,15 +235,38 @@ App-repo side:
   image** (`packer/variables.pkr.hcl:120`). A lock resolved locally can therefore
   contain packages the image cannot install. It did not bite here — all three
   packages require `php ^7.2.5 || ^8.0`, verified before committing — but that was
-  luck. Pin `config.platform.php` to the image's version.
+  luck.
 
-**Blob storage is not wired into the app repo — and the earlier framing of this
-was wrong.** Re-checked 2026-08-04. `composer.json` requires **neither
-`drupal/az_blob_fs` nor `drupal/key`**, and neither appears in
+  **Pinned 2026-08-11 on `mccarthy-index` branch `feat/az-blob-fs`** (unmerged):
+  `config.platform.php` is set to `8.3`, and `composer.lock` now records
+  `platform-overrides: {"php": "8.3"}`. Pinning it *before* adding az_blob_fs is
+  what makes that resolution trustworthy — and it moved nothing already locked,
+  so the pin is free to adopt. **`lib-main` is still unpinned and has the same
+  hazard.**
+
+**Blob storage was never wired into the app repo. Fix prepared 2026-08-11 on
+`mccarthy-index` branch `feat/az-blob-fs` (commit `a0af263`) — committed, not yet
+pushed or merged, so nothing below has reached production.**
+
+**The infra half has been complete since bootstrap**, and is recorded here so
+nobody re-derives it: a private `drupal-media` container (verified 2026-08-11 —
+it exists and holds **zero blobs**), the VMSS identity holding Storage Blob Data
+Contributor, the account key mirrored to Key Vault as
+`production-storage-account-key` and substituted into `settings.php` at boot by
+`fetch-secrets.sh`, and an Apache reverse proxy mapping `/drupal-media/*` to the
+blob endpoint with a read-only SAS (`cloud-init.tftpl:448-449`). That proxy is
+what makes `az_blob_cdn_host_name = ${domain_name}` coherent rather than wrong.
+**The SAS expires 2028-01-01** (`var.media_sas_expiry`) — a hard date somebody
+must roll before media stops being served.
+
+What was missing was entirely app-side: `composer.json` required **neither
+`drupal/az_blob_fs` nor `drupal/key`**, and neither appeared in
 `config/core.extension.yml`, while cloud-init unconditionally writes
-`$settings['file_default_scheme'] = 'azblob'`,
 `$config['az_blob_fs.settings'][...]` and `$config['key.key.azure_blob_key'][...]`
-into `settings.php`.
+into `settings.php`. So every override landed on configuration that does not
+exist — and **a `$config` override cannot bring a config entity into being**,
+which is why `key.key.azure_blob_key` needed an exported shell rather than just a
+module.
 
 This entry used to say it was "most likely to bite on the first real deploy." It
 is not, and the mechanism matters:
@@ -259,20 +282,67 @@ is not, and the mechanism matters:
   in `config/`. Compare `lib-main`, which sets `uri_scheme: azblob` on all five of
   its file field storages. So the first deploy has nothing to store and will not
   break.
+- **The reverse also bites.** Enabling the modules without exporting their config
+  is not stable either: a full `config:import` deletes active configuration that
+  is absent from the sync directory. Modules and their config files have to land
+  together.
 
 The real trigger is **the day someone adds an image or file field to `record`**:
 files then land on VMSS local disk and are wiped by the next reimage, silently.
-Cheap now, expensive later. Fix is `composer require drupal/az_blob_fs:^3.0
-drupal/key:>=1.15` (the versions lib-main runs), both modules added to
-`core.extension.yml`, and `az_blob_fs.settings.yml` + `key.key.azure_blob_key.yml`
-exported as empty shells for cloud-init's `$config` overrides to land on — a
-`$config` override does nothing if the config entity it targets does not exist.
-Copy lib-main's.
+Cheap now, expensive later.
 
-**Unverified, worth ten minutes on devtest:** cloud-init sets
-`$settings['file_default_scheme']`, but Drupal 9+ reads the default scheme from
-`system.file:default_scheme` config, not from `$settings`. That line may be inert
-in **both** this project and lib-main.
+**What the prepared fix does** (`feat/az-blob-fs`, one commit, unmerged):
+
+- `composer require drupal/az_blob_fs:^3.0 drupal/key:>=1.15`, resolving to
+  **az_blob_fs 3.0.0 and key 1.22.0 — the exact versions lib-main runs** — plus
+  `microsoft/azure-storage-blob` 1.5.4 and `azure-storage-common` 1.5.2. 104
+  packages to 108, **0 updates and 0 removals**, so nothing already locked moved.
+  Note `microsoft/azure-storage-blob` is **abandoned upstream** with no suggested
+  replacement; lib-main carries the same dependency.
+- Both modules added to `core.extension.yml`. az_blob_fs declares `key:key` and
+  `drupal:image`; `image` was already enabled.
+- `az_blob_fs.settings.yml` and `key.key.azure_blob_key.yml` exported as empty
+  shells for cloud-init's overrides to land on. The former is copied from
+  lib-main, and its `_core.default_config_hash` was **verified** to be
+  `Crypt::hashBase64(serialize())` of az_blob_fs 3.0.0's own
+  `config/install/az_blob_fs.settings.yml` — so it is a genuine module default,
+  not a snapshot of another site's settings. The latter carries a freshly minted
+  UUID rather than lib-main's.
+- Pins `config.platform.php` to `8.3`, which is what made the resolution above
+  trustworthy. See the unpinned-resolution note under the guzzle entry.
+
+**`$settings['file_default_scheme']` is inert. Verified 2026-08-11 — this is no
+longer an open question.** It was previously filed here and in
+`docs/bootstrap-runbook.md` as "unverified, worth ten minutes on devtest". No
+devtest run was needed; Drupal 11 core settles it:
+
+- **Zero** occurrences of `Settings::get('file_default_scheme')` anywhere in core
+  or contrib. The name survives only as a *form key*:
+  `core/modules/system/src/Form/FileSystemForm.php:132-135` declares it with
+  `'#config_target' => 'system.file:default_scheme'`.
+- Every consumer reads config instead — `FileItem.php:64` (which is what supplies
+  a new file field's default `uri_scheme`), `ImageStyle.php:234,543`,
+  `ImageThemeHooks.php:234`, `ThemeSettingsForm.php:495`.
+
+So the line cloud-init writes has never done anything, in **either** project.
+What actually governs is `config/system.file.yml`, and both repos export it with
+`default_scheme: public`, which `config:import` re-asserts on every deploy.
+**lib-main is unaffected in practice only because it sets `uri_scheme: azblob`
+explicitly on all five of its file field storages** — the default is never
+consulted. Two consequences:
+
+- The `feat/az-blob-fs` branch deliberately leaves `default_scheme: public`,
+  matching lib-main. Switching it to `azblob` would also apply to DDEV, which has
+  no Azure credentials. **Set `uri_scheme: azblob` per field instead** when file
+  fields are added to `record`.
+- If a site-wide default is ever wanted, the correct override is
+  `$config['system.file']['default_scheme']`, not `$settings[...]`. The dead line
+  sits at `environments/production/cloud-init.tftpl:75` and
+  `environments/dev/cloud-init.tftpl:71` **in this repo and in `lib-main-infra`
+  alike** — the files are near-copies, down to the line numbers. Not removed here
+  because editing cloud-init changes `custom_data`, which is a VMSS model change
+  and therefore a reimage; it is harmless where it sits, so it should ride along
+  with the next change that reimages anyway.
 
 Not a defect, just a difference: DDEV declares PHP 8.4 against production's 8.3.
 Core needs >= 8.3. PostgreSQL matches at 18 on both sides since 2026-07-31.

@@ -290,9 +290,11 @@ per-item state** — read it before touching anything here. Summary as of
   the `environment:` keys in the deploy workflows currently enforce nothing.
 - **the dev team owns the `dev` branch and branch protection.** Until `dev`
   exists nothing can dispatch, so that is what gates the first end-to-end run.
-- still open on the app-repo side: no root `.gitignore`; `az_blob_fs`/`key` not
-  required in `composer.json` nor listed in `core.extension.yml`; 6 Dependabot
-  alerts in `composer.lock` that a build would bake into the image.
+- still open on the app-repo side: no root `.gitignore`; three `drupal/core`
+  advisories that only `composer audit --locked` reports. `az_blob_fs`/`key` were
+  missing from `composer.json` and `core.extension.yml`; a fix is committed on
+  `mccarthy-index` branch `feat/az-blob-fs` but not merged. The 6 Dependabot
+  alerts were cleared 2026-08-10.
 - DDEV declares PHP 8.4 against production's 8.3. Core only needs PHP >= 8.3, so
   this is a difference rather than a defect. PostgreSQL now matches at 18 on both
   sides, so local dumps restore into production cleanly.
@@ -431,4 +433,4 @@ Not inherited — these surfaced here and lib-main has not hit them yet.
 | An unset repo variable is `""`, not null | `TF_VAR_x: ${{ vars.X }}` with `X` unset sets the env var to the **empty string**, and Terraform does not read that as `null`. Any `var.x == null` gate silently takes the wrong branch. Cost us every CI production deploy via `PUBLIC_IP_ID` before it was ever noticed, because `modules/load-balancer/main.tf:39` gates IP creation on `== null`. **lib-main uses the same pattern and is exposed wherever a `vars.` value is optional.** Grep for `== null` against anything sourced from `vars.`. |
 | A workflow triggers on the push that adds it | GitHub evaluates workflows from the pushed commit, so committing a new `on: push: branches: [main]` workflow **fires it immediately**. Adding a production-deploy dispatcher is therefore itself a production deploy. Land such files only when an unattended run is acceptable, or gate them behind an environment with a required reviewer. Corollary, observed 2026-08-07: **creating a branch also emits a `push` event**, but `paths-ignore` still applies — creating `dev` at `bb2ea88`, whose diff is entirely `.github/**`, triggered nothing. Do not rely on that for a branch cut from a commit that touches real files. |
 | `environment:` with no environment enforces nothing | GitHub auto-creates a missing environment on first use **with no protection rules**. `mccarthy-infra` declared `environment: production` in two deploy workflows while `total_count` was 0, so the approval gate everyone assumed existed did not. Check `gh api /repos/<org>/<repo>/environments` rather than trusting the workflow YAML. |
-| `$settings['file_default_scheme']` may be inert (**unverified**) | Cloud-init sets it in both projects, but Drupal 9+ reads the default scheme from `system.file:default_scheme` config, not `$settings`. If so, neither site's default scheme is actually `azblob` and both rely on per-field `uri_scheme`. Worth ten minutes on devtest; **applies to lib-main identically**. |
+| `$settings['file_default_scheme']` is inert (**verified 2026-08-11**) | Cloud-init sets it in both projects and it has never done anything. Drupal 8+ reads the default scheme from `system.file:default_scheme` config; core contains **zero** reads of `Settings::get('file_default_scheme')`, and `FileSystemForm.php:132-135` binds that form key to `'#config_target' => 'system.file:default_scheme'`. Both repos export `system.file.yml` with `default_scheme: public`, which `config:import` re-asserts every deploy — so neither site's default scheme is `azblob`, and both rely on per-field `uri_scheme`. **Applies to lib-main identically.** Full write-up in `docs/TODO.md`. |
