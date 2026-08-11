@@ -22,17 +22,30 @@ touched. Both runs hit rough edges and the fixes are folded in below — see
 | 5. `environments/devtest` | applied — PostgreSQL 18, `mccdevtesth6srb8na` |
 | 6. `environments/production` | applied — both passes, re-plans clean; serving on libtest1 |
 | 7. Harden state account | done — `allowSharedKeyAccess: false` |
-| 8. App repo wiring | not started — no `.github/` in `mccarthy-index` |
+| 8. App repo wiring | done 2026-08-11 — production serves `mccarthy-index` from `0.0.5` |
 | 9. First image build | done — `0.0.4`, bootstrap image (vanilla Drupal, not the app repo) |
 | 10. Re-enable schedule | done — active since 2026-08-03 |
 
 Production came up on 2026-08-03 and works end to end: the VMSS booted from
 `0.0.4`, cloud-init installed Drupal, and Let's Encrypt issued a real certificate
-for `libtest1.lib.utk.edu` over HTTP-01 (valid to 2026-11-01, renewed by
-`certbot-renew.timer` with a deploy hook that re-uploads to the `tls-certs`
-container). `https://libtest1.lib.utk.edu/health` returns 200 against a publicly
-trusted chain. **The site it serves is vanilla Drupal 11, not the Cormac Index** —
-that waits on step 8.
+for `libtest1.lib.utk.edu` over HTTP-01. `https://libtest1.lib.utk.edu/health`
+returns 200 against a publicly trusted chain.
+
+**Since 2026-08-11 the site serves the Cormac Index**, from image `0.0.5`, after
+the first `dev → main` promotion drove `deploy-on-main-merge.yml`'s production
+path. Step 8 is complete.
+
+**Correction — that first certificate was never persisted.** This paragraph used
+to say the cert was "renewed by `certbot-renew.timer` with a deploy hook that
+re-uploads to the `tls-certs` container". The timer and the hook are real, but the
+container was **empty from 2026-08-03 until 2026-08-11**: the upload is unchecked,
+and production's first apply deliberately ran with `enable_vmss_blob_access =
+false`, so it had no data-plane access at the moment it tried. The certificate
+lived only on that instance's disk, and the first reimage took HTTPS down for 25
+minutes while the deploy reported success. Recovered by hand the same day;
+`tls-certs` now holds both PEMs. Full write-up in `docs/TODO.md`. **Do not read
+this as evidence that cert persistence works — the next reimage is the first real
+test of it.**
 
 **Nothing in this repository had ever run in CI before 2026-08-03.** The first
 three dispatches each failed on a different latent defect — OIDC subject format,

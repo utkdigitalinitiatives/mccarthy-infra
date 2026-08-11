@@ -61,18 +61,45 @@ be silently ignored.
 
 ---
 
-### App repo (`mccarthy-index`) — step 8, partly wired, blocked on the dev team
+### App repo (`mccarthy-index`) — step 8 complete; follow-ups open
 
-**This is the only remaining bootstrap step.** Steps 1–7, 9 and 10 are done;
-production is applied and serving. The README's "Contract the app repo must
-satisfy" is the authoritative list.
+**Step 8 landed 2026-08-11. All ten bootstrap steps are now done.** Production
+serves the `mccarthy-index` codebase from image `0.0.5`. The README's "Contract
+the app repo must satisfy" is the authoritative list; the items below are
+follow-ups, and none of them block the pipeline.
 
-**Progress as of 2026-08-04.** The dispatch plumbing is wired and the credential
-question is settled. What is left is one deliberate hold on our side and a branch
-setup owned by the dev team. **Nothing has fired end to end yet** — no image has
-ever been built from the app repo, `mccarthy-index` still carries only its
-2026-07-07 scaffold, and production still serves the vanilla Drupal baked into
-image `0.0.4`. Read the per-item state below rather than assuming.
+**2026-08-11 — the production path ran for the first time.** PR #4 (`dev → main`)
+merged at 12:17:33Z as commit `0ea7518`; `dispatch-main-merge.yml` fired and was
+accepted on its first attempt; `deploy-on-main-merge.yml` (run `31490534785`) ran
+its production path end to end — gallery query → `0.0.5` → apply on
+`environments/production` → rolling reimage → health check → dev stack destroyed.
+Every step reported success. VMSS instance `2` runs `0.0.5`, and the site serves
+`<title>Log in | Cormac Index</title>` in place of the vanilla Drupal in `0.0.4`.
+
+**That green run still took HTTPS down for 25 minutes**, and the workflow could
+not see it. See "The first production reimage broke TLS while the deploy reported
+success" under Open. Recovered by hand at 12:46Z.
+
+**Correcting the 2026-08-10 text that used to sit here.** It claimed PR #2's merge
+"drove the whole chain for the first time: dispatch → image `0.0.5` → blob sync →
+devtest DB sync → first-ever apply of `environments/dev/`". That conflates two
+separate runs and overstates what the dispatch chain proved. What actually ran:
+
+- `build-on-dispatch.yml` run `31400881287`: **Build Image ✅ → Sync Blob Storage
+  ✅ → Prepare Database ❌ → Deploy Dev ⏭️ skipped.** Image `0.0.5` was genuinely
+  the first ever built from the app repo and the blob sync did run, but the chain
+  died at the database step on the password defect below.
+- The devtest DB sync and the **first-ever apply of `environments/dev/`** were
+  proven separately by a manual `test-cloud-init.yml` run (`31418568438`) after
+  both fixes landed. Different workflow, different code path.
+
+So **`build-on-dispatch.yml` has still never completed end to end**, and the
+password fix has only ever been exercised in `test-cloud-init.yml`'s copy of it.
+The next merge to `dev` remains a first run for that workflow.
+
+Two defects surfaced on 2026-08-10, both fixed the same day — the first two
+entries under Resolved below. Both had a **comment directly above the broken line
+asserting the false premise**, so reading the code argued *for* the bug.
 
 **Gating decision resolved: `mccarthy-index` went PUBLIC on 2026-08-04.** The
 anonymous clone works and no git credential is needed; step 8 work is unblocked.
@@ -109,15 +136,25 @@ Infra-side work:
   `libtest1` resource in `dns-test-rg`, verified against the live LB frontend.
   `LB_DNS_LABEL` is still unset and that is correct — `main.tf:173` forces
   `dns_label = null` whenever `public_ip_id` is set.
-- **`deploy-on-main-merge.yml` has still never fired**, and `environments/dev/`
-  has never been applied. Expect first-run defects; see the CI note at the bottom
-  of this file.
-- **No GitHub environment exists — `total_count` is 0.** `deploy-production.yml`
-  and `deploy-on-main-merge.yml` both declare `environment: production` and
-  `build-on-dispatch.yml` declares `environment: dev`, but GitHub auto-creates an
-  environment on first use with **no protection rules**, so all three are
-  currently decorative. Create `production` with a required reviewer before the
-  main-merge path goes live, or a dev→main merge deploys production unattended.
+- **DONE 2026-08-10 — `environments/dev/` applied** for the first time, after the
+  RG fix below — through `test-cloud-init.yml`, not through the dispatch chain.
+  **DONE 2026-08-11 — `deploy-on-main-merge.yml`'s production path fired** and
+  reported success; it had previously only ever run in `cleanup_only` mode. It
+  still surfaced a latent defect, as every first run in this repo has. See the CI
+  note at the bottom of this file.
+- **DONE 2026-08-10 — GitHub environments `dev` and `production` created**, both
+  with **zero protection rules**, byte-identical to lib-main's. This entry used to
+  say to create `production` with a required reviewer. **That was the wrong layer**
+  and the advice is withdrawn. Environment gates fire *after* the push event, in
+  the middle of the deploy job; the `dev → main` PR approval already happened
+  *before* the merge that fires the dispatch. Gating both means approving the same
+  decision twice. lib-main reached the same conclusion — it removed its
+  `production-approval` and `dev-review` environment gates on 2026-03-03 (commits
+  `d0a2012`, `f72164c`, no rationale recorded; the orphaned environments still
+  exist there, referenced by no workflow). **The layer that actually gates
+  production is the rulesets on `mccarthy-index`** — see the branch-protection
+  item below. The environments are still worth having for deployment history and
+  as a home for environment-scoped secrets.
 
 App-repo side:
 
@@ -128,15 +165,17 @@ App-repo side:
   holding the exact re-dispatch command, because lib-main lost a pipeline run to a
   silent server-side dispatch failure that nobody noticed. Adapted from
   `lib-main`'s equivalents, which have neither the retry nor the alert.
-- **HELD BACK DELIBERATELY — `dispatch-main-merge.yml`.** It is written and
-  `actionlint`-clean but sits **untracked** in `~/projects/mccarthy-index`. It has
-  not been committed because **`on: push: branches: [main]` fires on the very push
-  that adds the file** — GitHub evaluates workflows from the pushed commit — so
-  committing it immediately triggers a first-ever, unattended, unreviewed
-  production deploy. Land it only once the `production` environment has a required
-  reviewer. It deliberately carries no `paths-ignore`, unlike the dev dispatch,
-  because the main-merge event also destroys the dev VM and skipping a docs-only
-  merge would leave that VM running and billing.
+- **DONE 2026-08-10 — `dispatch-main-merge.yml` landed.** Held back until then
+  because **`on: push: branches: [main]` fires on the very push that adds the
+  file** — GitHub evaluates workflows from the pushed commit — so committing it
+  would have triggered a first-ever, unattended, unreviewed production deploy.
+  The hold was lifted once `main` required an approved PR (rulesets, below), which
+  makes the deploy it fires reviewed by construction. It went in via `dev` first
+  (PR #3): landing it on `dev` is inert because `dispatch-dev-merge.yml` lists
+  `.github/**` in `paths-ignore`. It deliberately carries no `paths-ignore` itself,
+  unlike the dev dispatch, because the main-merge event also destroys the dev VM
+  and skipping a docs-only merge would leave that VM running and billing.
+  **It is now live: the next merge to `main` deploys production.**
 - **DONE 2026-08-07 — `dev` branch created** at `bb2ea88`, same tip as `main`.
   Creating it emitted a `push` event on `dev` but triggered nothing, because that
   commit's diff is entirely `.github/**`, which `dispatch-dev-merge.yml` lists in
@@ -144,17 +183,59 @@ App-repo side:
   end-to-end pipeline run** — Packer build, `DROP`/`CREATE` on the devtest
   database, blob sync, and the first-ever apply of `environments/dev/`. Expect
   first-run defects.
-- **Still open — branch protection**, deliberately deferred 2026-08-07. `main` is
-  unprotected, so `dev-to-main.yml` runs but nothing requires it to pass, and
-  nothing stops a direct push to `main`. The flow is `topic → dev → main`.
+- **DONE 2026-08-10 — branch protection, via rulesets.** Ported lib-main's two
+  rulesets to `mccarthy-index`, diff-identical to the originals: **`dev-review`**
+  on `refs/heads/dev` and **`dev-to-main`** on `refs/heads/main`. Each requires a
+  PR with 1 approving review, dismisses stale reviews on push, allows merge
+  commits only, and blocks force-push and deletion; `dev-to-main` additionally
+  requires the **`enforce`** status check, which is the job name in
+  `dev-to-main.yml` in both repos. `bypass_actors: []` on both.
+
+  **Look for rulesets, not classic branch protection.** `GET
+  /repos/{o}/{r}/branches/{b}/protection` returns **404 on all four repos**
+  (`lib-main`, `lib-main-infra`, `mccarthy-index`, `mccarthy-infra`) — that 404
+  means "no *classic* protection", not "unprotected". lib-main's enforcement was
+  invisible until `GET /repos/{o}/{r}/rulesets` was checked. Use
+  `/rules/branches/{b}` to see what actually applies to a branch.
+
+  This is what makes `dev-to-main.yml` load-bearing: before, the workflow ran but
+  nothing required it to pass. It proved itself the same day — PR #1
+  (`security/guzzle-7.15.2 → main`) failed the check in 6 seconds for having a
+  non-`dev` head, and PR #4 (`dev → main`) passed it.
+
+  Two consequences. **You cannot approve your own PR**, so a solo change to
+  `mccarthy-index` needs a developer's approval. And `gh pr merge` fails with
+  `the base branch policy prohibits the merge`; `--admin` forces it, which
+  defeats the control.
+
+  **STILL OPEN — a standing bypass actor was added to `dev-to-main` on
+  2026-08-11** so that PR #4 could be merged without a second reviewer: user
+  `26966411`, `bypass_mode: "always"`. **"always" is not one-shot.** It exempts
+  that account from the review requirement on *every* future `dev → main` PR,
+  silently and indefinitely. The `enforce` status check still applies; the
+  human-approval half no longer does. Remove it now that the production path is
+  proven — otherwise the control only binds people who are not the person who
+  normally merges. `dev-review` on `refs/heads/dev` still has `bypass_actors: []`.
 - still no root `.gitignore`, so `vendor/` and `web/core/` are one `git add -A`
-  away
-- **6 open Dependabot alerts, all `guzzlehttp/guzzle`** (1 high, 5 moderate).
-  They live in `composer.lock`, which the Packer build installs with
-  `composer install --no-dev`, so they would be baked into the production image. A
-  `composer update guzzlehttp/guzzle` on `dev` clears all six and makes a good
-  first exercise of the pipeline: a real change, a verifiable outcome, nothing
-  else riding on it.
+  away. Mitigate in the meantime with `composer update <pkg> --no-install`, which
+  updates `composer.lock` without ever materialising `vendor/`.
+- **DONE 2026-08-10 — the six `guzzlehttp/guzzle` Dependabot alerts are cleared.**
+  `composer.lock` only: guzzle 7.13.2 → **7.15.3**, plus `guzzlehttp/promises`
+  2.5.0 → 2.5.2 and `guzzlehttp/psr7` 2.12.3 → 2.13.0, which move out of necessity
+  — guzzle 7.15.3 requires `promises ^2.5.2` and `psr7 ^2.13`, so a guzzle-only
+  partial update cannot resolve. Nothing else changed; the package count held at
+  104 and `composer.json`'s content hash is unchanged. This was the intended first
+  exercise of the pipeline and it worked as designed, flushing out both defects
+  recorded below.
+
+  **Resolution is unpinned and that is a latent hazard.** Neither this repo nor
+  `lib-main` sets `config.platform.php`, and neither declares a root
+  `require.php`, so `composer update` resolves against whatever PHP is running:
+  8.5 on the workstation used here, 8.4 in `.ddev/config.yaml`, **8.3 on the base
+  image** (`packer/variables.pkr.hcl:120`). A lock resolved locally can therefore
+  contain packages the image cannot install. It did not bite here — all three
+  packages require `php ^7.2.5 || ^8.0`, verified before committing — but that was
+  luck. Pin `config.platform.php` to the image's version.
 
 **Blob storage is not wired into the app repo — and the earlier framing of this
 was wrong.** Re-checked 2026-08-04. `composer.json` requires **neither
@@ -198,6 +279,166 @@ Core needs >= 8.3. PostgreSQL matches at 18 on both sides since 2026-07-31.
 
 ---
 
+### The first production reimage broke TLS while the deploy reported success
+
+**Found 2026-08-11 on the first-ever production deploy. Recovered by hand the
+same day; the code that allowed it is unchanged.**
+
+`deploy-on-main-merge.yml` run `31490534785` was green on every step, health check
+included. HTTPS was down for 25 minutes — 443 closed, no HTTP→HTTPS redirect — and
+nothing in the run said so.
+
+Four things had to line up. **Three of them are still true.** Only the empty
+container has been addressed, and only by hand — the code that emptied it is
+unchanged:
+
+**1. The cert was not in blob storage, and never had been.** `tls-setup.sh`
+restores `$DOMAIN/fullchain.pem` and `privkey.pem` from the `tls-certs` container
+before falling back to certbot. The container held **zero blobs**:
+
+```
+[2026-08-11 12:21:04] [tls-setup] No certificate found in blob storage
+```
+
+The Aug 3 certificate had only ever existed on the old instance's disk and died
+with it. **Probable cause: `upload_blob` never checks whether the upload worked** —
+`curl -s -X PUT ...` with no status test, and `set -e` will not catch it because
+curl exits 0 on an HTTP error. Production's first apply deliberately ran with
+`enable_vmss_blob_access = false` (the two-pass bootstrap noted in
+`environments/production/terraform.tfvars`), so the VMSS identity had no data-plane
+access when `tls-setup.sh` ran; the second pass granted it but did not reimage, so
+the script never ran again. Consistent with every fact available, but the Aug 3
+instance is gone along with its log — inference, not proof. `docs/bootstrap-runbook.md`
+asserted the deploy hook "re-uploads to the `tls-certs` container": true of the
+code, never true of the container.
+
+**2. certbot ran before the new instance was serving the public IP.** Falling
+through to Let's Encrypt, the HTTP-01 challenge was fetched and got a **404**:
+
+```
+Detail: 132.196.154.18: Invalid response from
+http://libtest1.lib.utk.edu/.well-known/acme-challenge/xhcy...: 404
+```
+
+The file existed — on the new instance. `runcmd` order is `fetch-secrets` →
+`drupal-init` → `tls-setup` → `restart php-fpm` → `restart httpd`, so certbot runs
+while the instance is still mid-cloud-init, before its own httpd restart and
+before the load balancer has moved traffic to it.
+
+**What is proven:** instance 2's httpd access logs contain **no acme-challenge
+request at that time at all**, so the validation never reached the machine that
+wrote the file. The path itself is fine — verified after the fact at 200 locally
+and 200 on five consecutive external fetches. **What is inferred:** that the
+outgoing `0.0.4` instance answered the challenge. That fits the timing and the
+404, but that instance is gone and its logs with it, so it is not established.
+Either way the conclusion holds — issuance depended on which backend the load
+balancer happened to be using, which `tls-setup.sh` has no way to know.
+
+Aug 3 did not hit this because a first apply has no outgoing instance to race.
+
+**3. `set -e` did not catch the certbot failure.** `certbot certonly ... 2>&1 |
+tee -a "$LOG_FILE"` exits with **tee's** status, which is 0. The script continued
+and died one line later on `cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem`, so
+the visible error is a missing file rather than a refused certificate — the same
+shape as the two defects found on 2026-08-10, where the failure was disguised as
+something else.
+
+**4. The deploy's health check cannot detect any of this.** It requests
+`http://$DOMAIN/health` — deliberately plain HTTP, per the comment, to dodge a
+cert-warmup race. A TLS failure is therefore invisible to it by construction, and
+a deploy that leaves 443 dead looks exactly like a good one.
+
+**Recovery:** `/opt/tls-setup.sh && systemctl restart httpd` via `az vmss
+run-command invoke` on instance 2 at 12:46Z. It issued a cert (valid to
+2026-11-09), uploaded both PEMs — **populating `tls-certs` for the first time
+ever** — wrote the vhost and brought 443 up. Verified: HTTPS 200, HTTP 301, cert
+`CN=libtest1.lib.utk.edu` issued by Let's Encrypt.
+
+**What is actually fixed: the state, not the code.** `tls-certs` now holds a
+certificate, so the next reimage should restore rather than gamble on certbot,
+which makes items 2 and 3 much harder to reach. But all four mechanisms are still
+in `environments/production/cloud-init.tftpl` exactly as they were — nothing was
+changed to prevent a recurrence.
+
+Worth doing, roughly in value order:
+
+- **Assert HTTPS in `deploy-on-main-merge.yml`** after the existing health check —
+  `curl -sf https://$DOMAIN/health` with a retry loop. Without it the pipeline
+  cannot distinguish a working deploy from today's.
+- **Check the uploads — there are two, and neither is checked.** `upload_blob` in
+  `tls-setup.sh` and the standalone `/opt/tls-upload-cert.sh` called by the renewal
+  hook both run `curl -s -X PUT` with no status test. Either can no-op in silence,
+  which is what bought eight days of false confidence. Both should fail loudly.
+- **Drop the `| tee` on certbot**, or read `${PIPESTATUS[0]}`, so `set -e` sees the
+  real exit status.
+- **Do not issue certificates from cloud-init.** Restoring from blob is safe there;
+  issuance depends on the load balancer already pointing at this instance, which
+  cloud-init cannot know. A boot-time timer retrying until validation succeeds
+  removes the race.
+
+**Residual risk even with the blob copy present:** the restore rejects a cert with
+under 7 days left (`openssl x509 -checkend 604800`). An instance replacement inside
+that window, before `certbot-renew.timer` has renewed, falls back to certbot and
+hits the same race. Narrow, but real.
+
+**Renewal, for reference.** `certbot-renew.timer` is enabled at boot,
+`OnCalendar=*-*-* 00/12:00:00`, `RandomizedDelaySec=12hours`, `Persistent=true` —
+it *checks* twice daily but only renews inside certbot's default 30-day window, so
+the real renewal is around **2026-10-10** for a cert expiring 2026-11-09. The hook
+`/etc/letsencrypt/renewal-hooks/deploy/01-update-and-upload.sh` copies into
+`/etc/pki/tls`, restarts httpd and runs `/opt/tls-upload-cert.sh`. Both files were
+read on instance 2 and do what they claim — but note that is a statement about the
+code, and the same unchecked `curl -s -X PUT` sits at the end of it. **After the
+October renewal, check the `lastModified` on the two blobs in `tls-certs` rather
+than assuming it propagated:**
+
+```bash
+az storage blob list --account-name mccprod8yqx588v --container-name tls-certs \
+  --auth-mode key --query "[].{name:name, modified:properties.lastModified}" -o table
+```
+
+The start/stop schedule (`30 11` up, `30 22` down, Mon–Fri) means timer fires are
+missed routinely; `Persistent=true` catches up at next boot, and a 30-day window is
+ample slack.
+
+---
+
+### Dependabot does not report Drupal core advisories — `composer audit` does
+
+**Found 2026-08-10, while clearing the guzzle alerts.**
+
+The GitHub Dependabot alerts UI listed six open alerts on `mccarthy-index`, all
+`guzzlehttp/guzzle`. After clearing those, `composer audit --locked` reported
+**three more that Dependabot never surfaced at all**, against `drupal/core`
+11.4.1:
+
+```
+SA-CORE-2026-012  CVE-2026-55805  XSS
+SA-CORE-2026-011  CVE-2026-15917  XSS
+SA-CORE-2026-010  CVE-2026-15916  information disclosure
+```
+
+All three are patched in **11.4.4**; the locked version is 11.4.1. They live in
+`composer.lock`, which the Packer build installs with `composer install
+--no-dev`, so they bake into the image exactly the way the guzzle ones would
+have.
+
+The mechanism: Composer reads the **drupal.org** advisory database, which is
+where Drupal security releases are published. Dependabot's feed does not cover
+it. So **an empty Dependabot list is not evidence that the lock is clean** —
+that is the trap, because the alerts UI is the natural place to look and it
+reads as authoritative.
+
+Run `composer audit --locked` before any image build that matters. Note plain
+`composer audit` reports "No packages - skipping audit" when `vendor/` is
+absent; `--locked` is what audits the lock file itself.
+
+Not fixed here because a core minor bump is a real upgrade with config and
+schema implications, unlike a transitive library bump — it deserves its own dev
+cycle rather than riding along with the pipeline shakeout.
+
+---
+
 ### Nothing prunes images in the shared resource group
 
 **Observed 2026-08-03.** Pre-existing and mostly lib-main's, but mccarthy now
@@ -233,6 +474,95 @@ lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 ---
 
 ## Resolved
+
+### The devtest database sync authenticated with production's password
+
+**Found 2026-08-10 on the first end-to-end pipeline run. Fixed in `0a9393d`.**
+
+`build-on-dispatch.yml` (job `prepare-database`) fetched one secret and used it
+against both servers, under this comment:
+
+```
+# Production and devtest share one admin password today, so one fetch.
+```
+
+They do not, and never did. Key Vault has held **two** secrets since bootstrap —
+`production-db-admin-password` and `devtest-db-admin-password` — and
+`docs/bootstrap-runbook.md:117-118` generates both. Only the workflow assumed
+otherwise. Confirmed by comparing SHA-256 digests of the two values; they differ.
+
+```
+psql: error: connection to server at "mccarthy-devtest-psql.postgres.database.azure.com"
+  failed: FATAL:  password authentication failed for user "drupaladmin"
+```
+
+**The failure is shaped to mislead.** The production `pg_dump` runs first and
+succeeds, so the log shows a healthy production connection followed by devtest
+refusing auth — which reads as a devtest-side outage or firewall problem rather
+than the job using the wrong credential. Two `psql` calls fail in a row before
+the step exits, because the first is `|| true`.
+
+**Fix:** fetch both secrets, scope production's to the `pg_dump` alone, and
+`export PGPASSWORD` to devtest's once for everything targeting `DEVTEST_HOST`.
+Both are masked.
+
+`test-cloud-init.yml` carried the **identical** bug at line 192 and was fixed in
+the same commit. It had never been run, so it would have failed the same way the
+first time anyone used it.
+
+Verified by re-running: `Sync production database to devtest` passed, and the
+run then failed further along on the unrelated defect below.
+
+---
+
+### `environments/dev/` created its resource group instead of reading it
+
+**Found 2026-08-10 on the first-ever apply of the dev stack. Fixed in `f90269d`.**
+
+```
+Error: a resource with the ID ".../resourceGroups/mccarthy-dev-rg" already
+exists - to be managed via Terraform this resource needs to be imported into
+the State.
+```
+
+`environments/dev/main.tf` declared `resource "azurerm_resource_group" "dev"`,
+while production and devtest both use `data`. Its comment claimed
+`bootstrap/azure-setup.sh` pre-creates the group and "Terraform adopts the name
+on first apply". **Terraform never adopts an existing resource** — it errors, as
+above. The premise about bootstrap was correct (`azure-setup.sh:58,106`); only
+the conclusion was wrong.
+
+**Do not fix this by importing it.** That makes the apply pass and then destroys
+dev permanently on the first promotion to main:
+
+1. `deploy-on-main-merge.yml` runs an **untargeted** `terraform destroy` on this
+   stack, so an imported RG is deleted along with everything in it.
+2. Deleting the RG deletes every role assignment scoped to it — including the
+   service principal's `Contributor` on `mccarthy-dev-rg`.
+3. The SP holds Contributor on five named resource groups and **nothing at
+   subscription scope**, so it cannot create a resource group. The next dev
+   deploy fails with `AuthorizationFailed`, and the SP cannot regrant itself the
+   access it just lost.
+4. Recovery needs PIM Owner activation and a re-run of `bootstrap/azure-setup.sh`.
+
+**Why the code was written that way:** it is lib-main's, unadapted. lib-main uses
+`resource` for all three stacks and is right to — `lib-main-github-actions` holds
+`Contributor` at **subscription scope**. `mccarthy-github-actions` deliberately
+does not. mccarthy converted production and devtest to data sources for exactly
+this reason and missed dev, because dev had never been applied. This is the same
+permission asymmetry as the Packer resource-group entry below, in a second place.
+
+**Fix:** `data "azurerm_resource_group" "dev"`, matching the other two stacks.
+`terraform validate` catches the second reference in `outputs.tf`, which a grep
+of `main.tf` alone will miss. Destroy still tears down everything *inside* the
+group, which is where the cost is; only the empty shell and its role assignment
+survive.
+
+Verified end to end the same day: the apply succeeded, the dev VM served the
+app, and a later `cleanup_only` destroy left `mccarthy-dev-rg` present and empty
+with the SP's `Contributor` assignment intact.
+
+---
 
 ### The Composer fallback built an image with no Drush in it
 
@@ -444,3 +774,48 @@ Changed together, and they must stay together: `modules/postgresql/variables.tf`
 `environments/production/variables.tf`, the `PG_MAJOR` repo variable seeded by
 `bootstrap/azure-setup.sh`, and the `|| '18'` fallbacks in the four workflows.
 devtest and dev inherit the module default and need no separate change.
+
+---
+
+## A note on first runs
+
+**Nothing in this repo had ever run in CI before 2026-08-03, and every first run
+since has failed on a different latent defect.** The count stands at seven: four
+dispatches on 2026-08-03, two on 2026-08-10 (the devtest password and the dev
+resource group), and one on 2026-08-11 (TLS on the first production reimage).
+
+**Not one was visible from reading the code.** Worse, in the two found on
+2026-08-10 a **comment directly above the broken line asserted the false
+premise** — "Production and devtest share one admin password today" and
+"Terraform adopts the name on first apply". Reading the code did not merely fail
+to reveal the bug; it argued for it. Both comments were written by someone who
+believed them, and both were wrong about a fact that a single command would have
+settled. The 2026-08-11 defect repeats the pattern at the doc level: the runbook
+described blob-backed cert persistence that had never once occurred.
+
+**2026-08-11 added a new failure mode: the first run that reported success was
+also a failure.** The six before it announced themselves with a red run. This one
+was green on every step, because the only assertion it makes about the site is an
+HTTP request, and what broke was HTTPS. A first run is not verified by its own
+exit status — it is verified by checking the thing the run was supposed to
+produce. Look at the site, not the checkmark.
+
+The practical rule: **treat any path that has not executed as unverified, and
+treat the comments on it as unverified too.** Where a comment or a doc states a
+checkable fact — that two secrets match, that a resource will be adopted, that a
+scope is wide enough, that a file has been uploaded — check it rather than
+trusting it.
+
+Paths that have still never executed, as of 2026-08-11:
+
+- **`build-on-dispatch.yml` end to end.** Its best run reached `Sync Blob Storage`
+  and died in `Prepare Database`; `Deploy Dev` has never run from a dispatch. The
+  fix to `Prepare Database` has only been exercised in `test-cloud-init.yml`'s
+  copy of the same code.
+- **The blob restore branch of `tls-setup.sh`.** It has run twice and found an
+  empty container both times. `tls-certs` is populated as of 2026-08-11, so the
+  next reimage is the first time it will actually restore a certificate.
+- `deploy-production.yml` in full.
+- The `pr_number` / per-PR ephemeral variant of the dev stack. It is vestigial —
+  no workflow sets `TF_VAR_pr_number` — and it could not work as written anyway,
+  since `mccarthy-dev-pr-N-rg` is not one of the five groups the SP can touch.
