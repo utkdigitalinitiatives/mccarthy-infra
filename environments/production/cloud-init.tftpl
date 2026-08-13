@@ -234,6 +234,32 @@ write_files:
       SITE_UUID="${drupal_site_uuid}"
       CONFIG_SYNC_DIR="$DRUPAL_ROOT/config"
 
+      # az_blob_fs registers a stream wrapper that reads the key.key.azure_blob_key
+      # entity at construction (via the $config overrides in environment.php), so it
+      # cannot be installed by config:import's extension sync: the in-process install
+      # crashes drush ("You have requested a non-existent service") and aborts the
+      # import halfway, leaving every request fatal. Proven 2026-08-13 on the first
+      # dev deploy of the app-side blob wiring; the fix below was rehearsed on the
+      # same VM. Install in separate drush processes, seeding the key entity the
+      # wrapper needs before it first boots. No-op once the DB has the modules.
+      # Output goes to $LOG_FILE without tee: tee would mask exit codes from set -e.
+      enable_blob_modules() {
+        [ -d "$DRUPAL_ROOT/web/modules/contrib/az_blob_fs" ] || return 0
+        if sudo -u drupal $DRUSH pm:list --status=enabled --field=name 2>/dev/null | grep -qx az_blob_fs; then
+          return 0
+        fi
+        log "Pre-installing key + az_blob_fs (config:import cannot install a stream-wrapper module)..."
+        sudo -u drupal $DRUSH en key -y >>"$LOG_FILE" 2>&1
+        if [ -f "$CONFIG_SYNC_DIR/key.key.azure_blob_key.yml" ]; then
+          SEED_DIR=$(mktemp -d)
+          cp "$CONFIG_SYNC_DIR/key.key.azure_blob_key.yml" "$SEED_DIR/"
+          chmod 755 "$SEED_DIR" && chmod 644 "$SEED_DIR/key.key.azure_blob_key.yml"
+          sudo -u drupal $DRUSH config:import --partial --source="$SEED_DIR" -y >>"$LOG_FILE" 2>&1
+          rm -rf "$SEED_DIR"
+        fi
+        sudo -u drupal $DRUSH en az_blob_fs -y >>"$LOG_FILE" 2>&1
+      }
+
       # Check if Drupal is already installed
       cd "$DRUPAL_ROOT"
       if sudo -u drupal $DRUSH status --field=bootstrap 2>/dev/null | grep -q "Successful"; then
@@ -264,12 +290,20 @@ write_files:
         ' 2>&1 | tee -a "$LOG_FILE" || true
         sudo -u drupal $DRUSH cache:rebuild 2>&1 | tee -a "$LOG_FILE" || true
 
+        enable_blob_modules
+
         # Import config if config directory has files
         if [ -f "$CONFIG_SYNC_DIR/system.site.yml" ]; then
           log "Config sync directory has config, importing..."
-          sudo -u drupal $DRUSH config:import -y 2>&1 | tee -a "$LOG_FILE" || {
-            log "Config import failed (may be no changes), continuing..."
-          }
+          # A failed import leaves active config partial and the site broken, so it
+          # must abort loudly. drush exits 0 on "no changes", so the old "may be no
+          # changes" rationale for continuing was false. tee returns 0 regardless of
+          # drush's fate; read the real status from PIPESTATUS.
+          sudo -u drupal $DRUSH config:import -y 2>&1 | tee -a "$LOG_FILE"
+          if [ "$${PIPESTATUS[0]}" -ne 0 ]; then
+            log "ERROR: config:import failed; active config may be partial"
+            exit 1
+          fi
         else
           log "No config in sync directory, skipping import"
         fi
@@ -291,7 +325,7 @@ write_files:
         sudo -u drupal $DRUSH config:set system.site uuid "$SITE_UUID" -y 2>&1 | tee -a "$LOG_FILE"
 
         log "Enabling Azure Blob FS module..."
-        sudo -u drupal $DRUSH en key az_blob_fs -y 2>&1 | tee -a "$LOG_FILE" || true
+        enable_blob_modules
 
         log "Rebuilding cache..."
         sudo -u drupal $DRUSH cache:rebuild 2>&1 | tee -a "$LOG_FILE"

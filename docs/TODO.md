@@ -10,6 +10,94 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ## Open
 
+### `config:import` cannot install az_blob_fs — the first deploy of the blob wiring broke dev while its health check passed
+
+**Found 2026-08-13 on run `31713551667` of `build-on-dispatch.yml` — the first
+dispatch-driven deploy of image `0.0.6`, carrying PR #5's blob wiring. The
+eighth consecutive first-run defect. Dev recovered by hand the same day;
+cloud-init fixed in both templates. Production never ran the broken path — but
+it would have on the next `dev → main` promotion, and its health check would
+have reported the deploy green.**
+
+The run: Build Image ✅ → Sync Blob ✅ → **Prepare Database ✅ — the first time
+this workflow's own copy of the password fix ever ran** → Deploy Dev ❌ on the
+"Surface cloud-init logs" gate. So `build-on-dispatch.yml` has still never gone
+green end to end, but every job in it has now executed from a dispatch.
+
+**Mechanism, in order:**
+
+- The dev VM took the update path (devtest DB freshly synced from production,
+  which does not have the modules). `config:import` saw three operations:
+  create `az_blob_fs.settings`, create `key.key.azure_blob_key`, update
+  `core.extension`. Its extension sync installed `key`, then crashed installing
+  `az_blob_fs`: **"You have requested a non-existent service az_blob_fs."**
+  Installing a module that registers a stream wrapper inside drush's in-process
+  container rebuild is a known Drupal failure class (s3fs has the same issue).
+- The crash left `core.extension` updated but the install unfinished and
+  neither config created. Every subsequent bootstrap — web and drush alike —
+  fataled: first "The key entity type does not exist", then, after a cache
+  wipe, `Call to a member function getKeyValue() on null` in
+  `AzBlobFsService.php:101`. The wrapper's client construction reads the key
+  entity named by environment.php's `$config` override, and that entity did
+  not exist. **The override is what makes it fatal** — with no key name
+  configured, the same code returns null gracefully.
+- **The site returned 500 on every page while `/health` returned 200** — the
+  health endpoint does not bootstrap Drupal. "Run Dev Validation Tests" passed
+  against a fully broken site; only the log grep caught it, and only via the
+  dishonestly-worded "Config import failed (may be no changes), continuing..."
+  swallow. This is the TLS incident's blindness one layer deeper, and it is
+  exactly how a production deploy of this defect would have reported success.
+  `drush config:import -y` exits 0 when there is nothing to import, so that
+  "may be no changes" branch only ever fired on real failures.
+
+**Recovery (dev, by hand over SSH):** commenting the `az_blob_account_key_name`
+override in `/etc/drupal/environment.php` restored `drush cr` but not
+`config:import` or `php:eval` — the wrapper still threw during both — so both
+configs were hand-serialized with plain `php -r` + `symfony/yaml` and inserted
+into the `config` table via `drush sql:query` (which never bootstraps), caches
+truncated by SQL, override restored, `drush cr`. Verified: `config:status`
+clean against sync, site 200, title "Cormac Index".
+
+**az_blob_fs then executed for the first time in this stack, and it works:**
+`azblob://` write, read, and delete against devtest's `drupal-media` container
+all succeeded. Note a `drush cr` is required after the modules and config land
+before the wrapper functions.
+
+**The fix, rehearsed end to end on the dev VM** (modules uninstalled cleanly,
+then reinstalled from the exact state production's DB will be in on promotion
+day): both cloud-init templates now pre-install the modules in **separate drush
+processes** before `config:import` — `drush en key` → seed
+`key.key.azure_blob_key` alone via `config:import --partial --source=<tmpdir>`
+→ `drush en az_blob_fs`. Standalone `drush en az_blob_fs` does not hit the
+container crash; that was verified, not assumed. Every step is a no-op once the
+DB has the modules, and the block guards on the module directory existing, so
+DBs already carrying the modules and codebases without them are both
+unaffected. Also fixed alongside, because they were load-bearing in the
+incident: the "may be no changes" swallow is gone (production now exits 1 on a
+failed import, reading `PIPESTATUS[0]` since `| tee` masks the status — the
+same masking as the TLS entry's third defect), and production's fresh-install
+branch, which had the identical landmine in
+`drush en key az_blob_fs || true` before any config exists, now calls the same
+function.
+
+**Still open after the fix lands:**
+
+- Verify via `test-cloud-init.yml` (re-syncs devtest from production, so the
+  update path's install sequence runs for real) before the next `dev → main`
+  promotion. The promotion deploys production with whatever cloud-init is on
+  main at that moment.
+- **lib-main-infra's cloud-init has the same defect** — the files are
+  near-copies. Dormant there only because lib-main's production DB already has
+  az_blob_fs installed; a reinstall from a clean DB or any future
+  stream-wrapper module hits it.
+- `/health` has now let two incidents through (TLS, this). It is served
+  without bootstrapping Drupal, so a deploy that bricks every real page still
+  reports healthy. A check that exercises Drupal — `curl` of `/user/login`
+  expecting 200, or `drush status` — belongs in both the deploy workflow and
+  the dev validation step.
+
+---
+
 ### `DefenderForStorageSettings/current` must be imported, never created
 
 **Found 2026-07-31 during the first devtest apply.**
@@ -402,12 +490,13 @@ Fallback if the module dies before the refactor lands: Azure-OSS with custom
 Flysystem glue, or the Azure Files mount — both real design work, neither to be
 done as a side effect of something else.
 
-**Note az_blob_fs has never executed in this stack.** No file fields exist, so
-merging PR #5 put code on disk and modules in `core.extension.yml` without
-exercising a single read or write, on a Drupal version (11.4.x) that had a
-dev-version breakage report in January 2026 — 3.0.0-stable postdates that
-report, but our first real use is still a first run. The day file fields are
-added to `record`, smoke-test upload and serve on devtest before promoting.
+**az_blob_fs first executed in this stack on 2026-08-13** — not via a file
+field (none exist yet) but via a manual `azblob://` write/read/delete smoke
+test on the dev VM after the deploy failure recorded above, and it works on
+Drupal 11.4.1. The day file fields are added to `record`, still smoke-test
+upload and serve through the real UI on devtest before promoting — the wrapper
+working is not the same as image derivatives and the `/drupal-media/*` proxy
+path working.
 
 ---
 
@@ -912,9 +1001,12 @@ devtest and dev inherit the module default and need no separate change.
 ## A note on first runs
 
 **Nothing in this repo had ever run in CI before 2026-08-03, and every first run
-since has failed on a different latent defect.** The count stands at seven: four
+since has failed on a different latent defect.** The count stands at eight: four
 dispatches on 2026-08-03, two on 2026-08-10 (the devtest password and the dev
-resource group), and one on 2026-08-11 (TLS on the first production reimage).
+resource group), one on 2026-08-11 (TLS on the first production reimage), and
+one on 2026-08-13 (config:import crashing on the az_blob_fs install — the first
+deploy to carry the blob wiring, and the second first-run whose health check
+passed against a broken site).
 
 **Not one was visible from reading the code.** Worse, in the two found on
 2026-08-10 a **comment directly above the broken line asserted the false
@@ -938,12 +1030,16 @@ checkable fact — that two secrets match, that a resource will be adopted, that
 scope is wide enough, that a file has been uploaded — check it rather than
 trusting it.
 
-Paths that have still never executed, as of 2026-08-11:
+Paths that have still never executed, as of 2026-08-13:
 
-- **`build-on-dispatch.yml` end to end.** Its best run reached `Sync Blob Storage`
-  and died in `Prepare Database`; `Deploy Dev` has never run from a dispatch. The
-  fix to `Prepare Database` has only been exercised in `test-cloud-init.yml`'s
-  copy of the same code.
+- **`build-on-dispatch.yml` green end to end.** As of 2026-08-13 every job in it
+  has run from a dispatch — `Prepare Database` passed with its own copy of the
+  password fix for the first time — but the run went red in `Deploy Dev` on the
+  cloud-init log gate (the config:import entry above), so a fully green
+  dispatch-driven run has still never happened.
+- **The pre-install block added to both cloud-init templates on 2026-08-13.**
+  Rehearsed by hand on the dev VM, but never executed from a template render.
+  `test-cloud-init.yml` is the rehearsal path.
 - **The blob restore branch of `tls-setup.sh`.** It has run twice and found an
   empty container both times. `tls-certs` is populated as of 2026-08-11, so the
   next reimage is the first time it will actually restore a certificate.

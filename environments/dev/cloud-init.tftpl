@@ -299,11 +299,34 @@ runcmd:
       }
     ' >> /var/log/cloud-init-output.log 2>&1
     sudo -u drupal $DRUSH cache:rebuild >> /var/log/cloud-init-output.log 2>&1
+    # az_blob_fs registers a stream wrapper that reads the key.key.azure_blob_key
+    # entity at construction (via the $config overrides in environment.php), so it
+    # cannot be installed by config:import's extension sync: the in-process install
+    # crashes drush ("You have requested a non-existent service") and aborts the
+    # import halfway, leaving every request fatal. Proven 2026-08-13 on the first
+    # dev deploy of the app-side blob wiring; this fix was rehearsed on the same
+    # VM. Install in separate drush processes, seeding the key entity the wrapper
+    # needs before it first boots. No-op once the DB has the modules.
+    if [ -d "$DRUPAL_ROOT/web/modules/contrib/az_blob_fs" ] && \
+       ! sudo -u drupal $DRUSH pm:list --status=enabled --field=name 2>/dev/null | grep -qx az_blob_fs; then
+      echo "Pre-installing key + az_blob_fs (config:import cannot install a stream-wrapper module)..." >> /var/log/cloud-init-output.log
+      sudo -u drupal $DRUSH en key -y >> /var/log/cloud-init-output.log 2>&1
+      if [ -f "$CONFIG_SYNC_DIR/key.key.azure_blob_key.yml" ]; then
+        SEED_DIR=$(mktemp -d)
+        cp "$CONFIG_SYNC_DIR/key.key.azure_blob_key.yml" "$SEED_DIR/"
+        chmod 755 "$SEED_DIR" && chmod 644 "$SEED_DIR/key.key.azure_blob_key.yml"
+        sudo -u drupal $DRUSH config:import --partial --source="$SEED_DIR" -y >> /var/log/cloud-init-output.log 2>&1
+        rm -rf "$SEED_DIR"
+      fi
+      sudo -u drupal $DRUSH en az_blob_fs -y >> /var/log/cloud-init-output.log 2>&1
+    fi
     # Import config if config directory has files
     if [ -f "$CONFIG_SYNC_DIR/system.site.yml" ]; then
       echo "Importing configuration..." >> /var/log/cloud-init-output.log
+      # drush exits 0 on "no changes", so a nonzero status here is a real failure
+      # that leaves active config partial — say so in words the log grep gate matches.
       sudo -u drupal $DRUSH config:import -y >> /var/log/cloud-init-output.log 2>&1 || {
-        echo "Config import failed (may be no changes), continuing..." >> /var/log/cloud-init-output.log
+        echo "ERROR: config:import failed; active config may be partial" >> /var/log/cloud-init-output.log
       }
     else
       echo "No config in sync directory, skipping import" >> /var/log/cloud-init-output.log
