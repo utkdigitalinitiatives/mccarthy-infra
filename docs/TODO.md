@@ -237,7 +237,8 @@ App-repo side:
   packages require `php ^7.2.5 || ^8.0`, verified before committing — but that was
   luck.
 
-  **Pinned 2026-08-11 on `mccarthy-index` branch `feat/az-blob-fs`** (unmerged):
+  **Pinned 2026-08-11 on `mccarthy-index` branch `feat/az-blob-fs`, merged to
+  `dev` 2026-08-13 (PR #5):**
   `config.platform.php` is set to `8.3`, and `composer.lock` now records
   `platform-overrides: {"php": "8.3"}`. Pinning it *before* adding az_blob_fs is
   what makes that resolution trustworthy — and it moved nothing already locked,
@@ -245,8 +246,12 @@ App-repo side:
   hazard.**
 
 **Blob storage was never wired into the app repo. Fix prepared 2026-08-11 on
-`mccarthy-index` branch `feat/az-blob-fs` (commit `a0af263`) — committed, not yet
-pushed or merged, so nothing below has reached production.**
+`mccarthy-index` branch `feat/az-blob-fs` (commit `a0af263`) and merged to `dev`
+2026-08-13 as PR #5 (merge `2edd4eb`). Production gets it on the next
+`dev → main` promotion. The merge used `gh pr merge --admin`, because
+`dev-review` requires an approval and no second reviewer was in the loop — the
+same control gap as the standing bypass actor above, disclosed here for the same
+reason.**
 
 **The infra half has been complete since bootstrap**, and is recorded here so
 nobody re-derives it: a private `drupal-media` container (verified 2026-08-11 —
@@ -291,7 +296,7 @@ The real trigger is **the day someone adds an image or file field to `record`**:
 files then land on VMSS local disk and are wiped by the next reimage, silently.
 Cheap now, expensive later.
 
-**What the prepared fix does** (`feat/az-blob-fs`, one commit, unmerged):
+**What the fix does** (`feat/az-blob-fs`, one commit, merged 2026-08-13):
 
 - `composer require drupal/az_blob_fs:^3.0 drupal/key:>=1.15`, resolving to
   **az_blob_fs 3.0.0 and key 1.22.0 — the exact versions lib-main runs** — plus
@@ -346,6 +351,63 @@ consulted. Two consequences:
 
 Not a defect, just a difference: DDEV declares PHP 8.4 against production's 8.3.
 Core needs >= 8.3. PostgreSQL matches at 18 on both sides since 2026-07-31.
+
+---
+
+### Staying on `az_blob_fs` is a decision, not an accident — here are its triggers
+
+**Decided 2026-08-13**, at the moment the app-side wiring above was ready to
+merge — the cheapest point there will ever be to switch, since the site has no
+files. Recorded so the dependency risk stays a scheduled decision rather than a
+silent one.
+
+The concern was building a new site on a deprecated dependency. What is actually
+abandoned is **`microsoft/azure-storage-blob`**, the SDK underneath — Microsoft
+archived its PHP SDKs in November 2023. The module on top is not: verified
+2026-08-13, **az_blob_fs 3.0.0 was released 2026-02-18**, declares
+`^10 || ^11`, is covered by the Drupal Security Team, has four maintainers and
+~406 reported installs, and its issue queue carries an active refactor replacing
+the SDK with direct REST calls (SAS and Entra service-principal auth). So the
+bad dependency has a plausible expiration date via a normal module update.
+
+The alternatives were checked and do not escape the SDK:
+
+- League's official Flysystem Azure adapter depends on the **same** archived
+  SDK; the Drupal glue modules (`flysystem_azure`, `flysystem_az_blob`) are less
+  maintained than az_blob_fs itself.
+- The healthy replacement stack is community **Azure-OSS**
+  (`azure-oss/storage-blob-flysystem`, 2.2.0 released June 2026), but nothing in
+  Drupal contrib wires it in — using it today means custom stream-wrapper glue
+  we would own, which is worse for template legibility than the drift it avoids.
+- The SDK-free architecture is an Azure Files mount with plain local files — a
+  redesign of infra (proxy, SAS, Key Vault, cloud-init) that is already deployed
+  blob-shaped in both projects.
+
+**The plan: adopt az_blob_fs's REST refactor when it ships stable — on mccarthy
+first, then lib-main.** mccarthy has no files, so it is the free pilot; lib-main
+has real data and inherits a proven path. Drift in service of the intended
+future standard, not a fork.
+
+Reopen this decision if any of these fire:
+
+- the REST refactor releases stable (adopt it), or its issue goes quiet for a
+  year
+- az_blob_fs loses security-team coverage or the maintainers stop responding
+- a PHP bump breaks the archived SDK — the image is pinned to 8.3, so this
+  moves at our pace, but check `composer why` + a devtest build before any bump
+- lib-main starts its own migration for any reason: do not let the two projects
+  pick different replacements
+
+Fallback if the module dies before the refactor lands: Azure-OSS with custom
+Flysystem glue, or the Azure Files mount — both real design work, neither to be
+done as a side effect of something else.
+
+**Note az_blob_fs has never executed in this stack.** No file fields exist, so
+merging PR #5 put code on disk and modules in `core.extension.yml` without
+exercising a single read or write, on a Drupal version (11.4.x) that had a
+dev-version breakage report in January 2026 — 3.0.0-stable postdates that
+report, but our first real use is still a first run. The day file fields are
+added to `record`, smoke-test upload and serve on devtest before promoting.
 
 ---
 
