@@ -80,16 +80,27 @@ branch, which had the identical landmine in
 `drush en key az_blob_fs || true` before any config exists, now calls the same
 function.
 
-**Still open after the fix lands:**
+**VERIFIED IN PRODUCTION 2026-08-13.** The `test-cloud-init.yml` rehearsal was
+deliberately skipped; PR #6 (`dev → main`, same day) promoted the change and
+run `31720848832` reimaged production with the fixed cloud-init — the block's
+first execution from a template render, against the real no-modules production
+DB. Verified by the site, not the checkmark: HTTPS 200 on `/` and
+`/user/login` with the Cormac Index title (a failed import 500s every page),
+HTTP→HTTPS 301 intact. The TLS blob-restore branch also ran for the first time
+with content present and **restored rather than reissued** — the serving cert's
+serial is byte-identical to the pre-deploy snapshot
+(`0622AB63B506FB5D893F7BAAB1D18B855202`, notAfter 2026-11-09). Two
+never-executed paths ran clean on their first try — the first first-runs in
+this repo's history to do so.
 
-- Verify via `test-cloud-init.yml` (re-syncs devtest from production, so the
-  update path's install sequence runs for real) before the next `dev → main`
-  promotion. The promotion deploys production with whatever cloud-init is on
-  main at that moment.
+**Still open:**
+
 - **lib-main-infra's cloud-init has the same defect** — the files are
-  near-copies. Dormant there only because lib-main's production DB already has
-  az_blob_fs installed; a reinstall from a clean DB or any future
-  stream-wrapper module hits it.
+  near-copies; verified line-for-line 2026-08-13
+  (`production/cloud-init.tftpl:276-277,300` there). Dormant only because
+  lib-main's production DB already has az_blob_fs installed; a reinstall from
+  a clean DB or any future stream-wrapper module hits it. Decision 2026-08-13:
+  not ported for now.
 - `/health` has now let two incidents through (TLS, this). It is served
   without bootstrapping Drupal, so a deploy that bricks every real page still
   reports healthy. A check that exercises Drupal — `curl` of `/user/login`
@@ -334,12 +345,13 @@ App-repo side:
   hazard.**
 
 **Blob storage was never wired into the app repo. Fix prepared 2026-08-11 on
-`mccarthy-index` branch `feat/az-blob-fs` (commit `a0af263`) and merged to `dev`
-2026-08-13 as PR #5 (merge `2edd4eb`). Production gets it on the next
-`dev → main` promotion. The merge used `gh pr merge --admin`, because
-`dev-review` requires an approval and no second reviewer was in the loop — the
-same control gap as the standing bypass actor above, disclosed here for the same
-reason.**
+`mccarthy-index` branch `feat/az-blob-fs` (commit `a0af263`), merged to `dev`
+2026-08-13 as PR #5 (merge `2edd4eb`), and promoted to production the same day
+via PR #6 — production now runs image `0.0.6` with both modules installed.
+Both merges used `gh pr merge --admin`, because no second reviewer was in the
+loop (`dev-review` has no bypass actors; `dev-to-main`'s standing bypass actor
+evidently does not satisfy the API merge) — the same control gap as the
+bypass-actor entry above, disclosed here for the same reason.**
 
 **The infra half has been complete since bootstrap**, and is recorded here so
 nobody re-derives it: a private `drupal-media` container (verified 2026-08-11 —
@@ -1036,10 +1048,14 @@ Paths that have still never executed, as of 2026-08-13:
   has run from a dispatch — `Prepare Database` passed with its own copy of the
   password fix for the first time — but the run went red in `Deploy Dev` on the
   cloud-init log gate (the config:import entry above), so a fully green
-  dispatch-driven run has still never happened.
-- **The pre-install block added to both cloud-init templates on 2026-08-13.**
-  Rehearsed by hand on the dev VM, but never executed from a template render.
-  `test-cloud-init.yml` is the rehearsal path.
+  dispatch-driven run has still never happened. The next merge to `dev` is that
+  first run, now with the fixed cloud-init.
+
+No longer on this list as of the 2026-08-13 production promotion (run
+`31720848832`): the **blob restore branch of `tls-setup.sh`** (restored the
+existing cert — same serial before and after) and the **cloud-init pre-install
+block** (first render, ran clean against the no-modules production DB). Both
+were first runs that worked.
 - **The blob restore branch of `tls-setup.sh`.** It has run twice and found an
   empty container both times. `tls-certs` is populated as of 2026-08-11, so the
   next reimage is the first time it will actually restore a certificate.
