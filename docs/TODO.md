@@ -680,9 +680,34 @@ Run `composer audit --locked` before any image build that matters. Note plain
 `composer audit` reports "No packages - skipping audit" when `vendor/` is
 absent; `--locked` is what audits the lock file itself.
 
-Not fixed here because a core minor bump is a real upgrade with config and
-schema implications, unlike a transitive library bump — it deserves its own dev
-cycle rather than riding along with the pipeline shakeout.
+**Lock updated 2026-08-17 on `mccarthy-index` branch `security/drupal-11.4.5`
+(commit `a1b0dcd`, cut from `dev`). Not merged, not deployed.** The advisories
+are cleared but nothing has run the new code yet.
+
+- `composer update "drupal/core-*" --with-all-dependencies` resolved core to
+  **11.4.5**, not 11.4.4 — a newer patch in the same series, which contains the
+  same fixes. **26 updates, 0 installs, 0 removals**: the five `drupal/core-*`
+  packages, `mck89/peast`, and 20 `symfony/*` patch bumps inside 7.4.x.
+- `composer audit --locked` afterwards: **no advisories**. The only remaining
+  entry is the abandoned `microsoft/azure-storage-blob`, which is the recorded
+  az_blob_fs decision above, not a vulnerability.
+- **Only `composer.lock` changed.** `composer.json` needed no edit — `^11.4`
+  already admitted 11.4.5 — and the scaffold is byte-identical between 11.4.1
+  and 11.4.5 across all 23 tracked files under `web/`, verified by installing
+  both versions side by side in a scratch directory. Those tracked files were
+  also confirmed to match the 11.4.1 scaffold exactly, so no hand edit was at
+  risk of being overwritten.
+- Resolution ran against the `config.platform.php` pin of **8.3**, which is the
+  image's PHP. Core 11.4.5 requires `>=8.3.0`, and no package's `php`
+  constraint moved. The lock was never installed into the repo, so the missing
+  root `.gitignore` never had a chance to swallow `vendor/`.
+
+This was deliberately left for its own dev cycle rather than riding along with
+the pipeline shakeout — a core bump is a real upgrade with config and schema
+implications, unlike a transitive library bump. It is also the first deploy that
+the new TLS and Drupal gates will guard, so **push the workflow changes to
+`mccarthy-infra` `main` before merging this to `dev`**, or the build will run
+under the old blind check.
 
 ---
 
