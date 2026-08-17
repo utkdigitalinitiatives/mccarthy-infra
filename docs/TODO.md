@@ -101,11 +101,19 @@ this repo's history to do so.
   lib-main's production DB already has az_blob_fs installed; a reinstall from
   a clean DB or any future stream-wrapper module hits it. Decision 2026-08-13:
   not ported for now.
-- `/health` has now let two incidents through (TLS, this). It is served
-  without bootstrapping Drupal, so a deploy that bricks every real page still
-  reports healthy. A check that exercises Drupal — `curl` of `/user/login`
-  expecting 200, or `drush status` — belongs in both the deploy workflow and
-  the dev validation step.
+- ~~`/health` has now let two incidents through (TLS, this).~~ **Fixed in code
+  2026-08-17, not yet exercised by a deploy.** Every check step now runs a
+  Drupal gate after the `/health` gate: `GET /user/login`, requiring **both** a
+  200 **and** the string `user_login_form` in the body, because an error page
+  can be served with a 200. All four workflows carry it —
+  `deploy-on-main-merge.yml`, `deploy-production.yml`, `build-on-dispatch.yml`
+  ("Run Dev Validation Tests"), `test-cloud-init.yml`. The two production
+  workflows also gained the TLS gate described in the TLS entry below, so their
+  order is liveness (HTTP) → TLS (HTTPS) → Drupal. The marker was verified
+  against the live production login page on 2026-08-17, and the failure paths
+  were verified against a non-Drupal 200 and an unreachable host. **Both
+  incidents that got through would now fail the deploy.** Per this repo's own
+  record, treat the first run of these gates as a first run.
 
 ---
 
@@ -595,9 +603,15 @@ changed to prevent a recurrence.
 
 Worth doing, roughly in value order:
 
-- **Assert HTTPS in `deploy-on-main-merge.yml`** after the existing health check —
-  `curl -sf https://$DOMAIN/health` with a retry loop. Without it the pipeline
-  cannot distinguish a working deploy from today's.
+- ~~**Assert HTTPS in `deploy-on-main-merge.yml`**~~ — **done 2026-08-17**, and in
+  `deploy-production.yml` too. `curl -sf https://$DOMAIN/health` with a retry
+  loop (10 × 15s) runs after the plain-HTTP gate, followed by a Drupal gate; see
+  the `config:import` entry above. HTTP stays first so a warming certificate does
+  not fail the deploy, and the TLS gate is skipped when `DOMAIN_NAME` is unset,
+  because the fallback URL is a load-balancer FQDN with no certificate for it.
+  **Not yet exercised by a real deploy.** The three items below are still open,
+  so a certificate can still fail silently *inside* the instance — the gate
+  catches the result, not the cause.
 - **Check the uploads — there are two, and neither is checked.** `upload_blob` in
   `tls-setup.sh` and the standalone `/opt/tls-upload-cert.sh` called by the renewal
   hook both run `curl -s -X PUT` with no status test. Either can no-op in silence,

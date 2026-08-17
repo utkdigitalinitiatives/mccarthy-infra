@@ -467,21 +467,46 @@ jobs:
           echo "public_ip=$(terraform output -raw public_ip_address)" >> "$GITHUB_OUTPUT"
 
       - name: Run Dev Validation Tests
+        env:
+          DEV_IP: ${{ steps.outputs.outputs.public_ip }}
         run: |
-          DEV_IP="${{ steps.outputs.outputs.public_ip }}"
-          echo "Testing health endpoint on $DEV_IP..."
-
+          # Two gates. /health is served without bootstrapping Drupal, so on
+          # 2026-08-13 it returned 200 while a crashed config:import left every
+          # real page 500ing, and this step reported the deploy good.
+          echo "Gate 1/2: liveness at https://${DEV_IP}/health"
           for i in {1..30}; do
-            if curl -ksf "https://${DEV_IP}/health"; then
-              echo "Health check passed!"
-              exit 0
+            if curl -ksf --max-time 15 "https://${DEV_IP}/health" > /dev/null; then
+              echo "  VM is serving"
+              break
             fi
-            echo "Waiting for VM... (attempt $i/30)"
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Health endpoint did not respond after 30 attempts"
+              exit 1
+            fi
+            echo "  waiting for VM... (attempt $i/30)"
             sleep 10
           done
 
-          echo "Health check failed after 30 attempts"
-          exit 1
+          # /user/login renders the full stack and is never cached. Both the
+          # status and the form marker are checked: an error page can be a 200.
+          echo "Gate 2/2: Drupal at https://${DEV_IP}/user/login"
+          BODY="$RUNNER_TEMP/login.html"
+          for i in {1..10}; do
+            CODE=$(curl -ks -o "$BODY" -w '%{http_code}' --max-time 20 "https://${DEV_IP}/user/login" || true)
+            [ -n "$CODE" ] || CODE="000"
+            if [ "$CODE" = "200" ] && grep -q 'user_login_form' "$BODY"; then
+              echo "  Drupal rendered the login form"
+              exit 0
+            fi
+            if [ "$i" -eq 10 ]; then
+              echo "::error::Drupal did not render /user/login (last status $CODE) - the site is broken even though /health is up"
+              echo "First 2000 bytes of the response:"
+              head -c 2000 "$BODY" || true
+              exit 1
+            fi
+            echo "  waiting for Drupal... (status $CODE, attempt $i/10)"
+            sleep 15
+          done
 
       - name: Surface cloud-init logs
         if: always() && steps.outputs.outputs.public_ip != ''

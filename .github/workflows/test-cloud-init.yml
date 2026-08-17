@@ -259,21 +259,45 @@ jobs:
 
       - name: Health Check
         if: "!inputs.destroy_only"
+        env:
+          VM_IP: ${{ steps.outputs.outputs.public_ip }}
         run: |
-          VM_IP="${{ steps.outputs.outputs.public_ip }}"
+          # Two gates. /health does not bootstrap Drupal, so it stays 200 on a
+          # site that 500s everywhere - which is exactly what a cloud-init test
+          # needs to catch. See the 2026-08-13 entry in docs/TODO.md.
           echo "Waiting for the VM to boot and cloud-init to finish..."
-
+          echo "Gate 1/2: liveness at https://${VM_IP}/health"
           for i in {1..30}; do
-            if curl -ksf "https://${VM_IP}/health"; then
-              echo "Health check passed (HTTPS)!"
-              exit 0
+            if curl -ksf --max-time 15 "https://${VM_IP}/health" > /dev/null; then
+              echo "  VM is serving"
+              break
             fi
-            echo "Waiting for VM... (attempt $i/30)"
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Health endpoint did not respond after 30 attempts"
+              exit 1
+            fi
+            echo "  waiting for VM... (attempt $i/30)"
             sleep 10
           done
 
-          echo "::error::Health check failed after 30 attempts"
-          exit 1
+          echo "Gate 2/2: Drupal at https://${VM_IP}/user/login"
+          BODY="$RUNNER_TEMP/login.html"
+          for i in {1..10}; do
+            CODE=$(curl -ks -o "$BODY" -w '%{http_code}' --max-time 20 "https://${VM_IP}/user/login" || true)
+            [ -n "$CODE" ] || CODE="000"
+            if [ "$CODE" = "200" ] && grep -q 'user_login_form' "$BODY"; then
+              echo "  Drupal rendered the login form"
+              exit 0
+            fi
+            if [ "$i" -eq 10 ]; then
+              echo "::error::Drupal did not render /user/login (last status $CODE) - the site is broken even though /health is up"
+              echo "First 2000 bytes of the response:"
+              head -c 2000 "$BODY" || true
+              exit 1
+            fi
+            echo "  waiting for Drupal... (status $CODE, attempt $i/10)"
+            sleep 15
+          done
 
       - name: Summary
         if: always() && !inputs.destroy_only && steps.outputs.outputs.public_ip != ''
