@@ -73,9 +73,11 @@ variable "db_name" {
 
 variable "developer_identities" {
   description = <<-EOT
-    Map of developer username -> AAD object ID. Each entry gets an isolated
-    drupal-media-<username> container plus Storage Blob Data Contributor for
-    local azcopy sync. Kept out of git (public repo) - set in terraform.tfvars.
+    Map of developer username -> AAD object ID. One list of developers, granted
+    Storage Blob Data Reader on the drupal-media and db-dumps containers. Both
+    grants are container-scoped and read-only, so removing someone from this map
+    actually revokes their access.
+    Kept out of git (public repo) - set in terraform.tfvars.
   EOT
   type        = map(string)
   default     = {}

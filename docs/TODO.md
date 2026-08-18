@@ -43,14 +43,232 @@ consecutive reimage.
 
 **Left to do:**
 
-1. **The cloud-init log gate fails on the word `warning`** — see the Open entry
-   directly below. It red-X'd an otherwise correct dev deploy on 2026-08-18.
+1. **The cloud-init log gate fails on the word `warning`** — see its Open entry
+   below. It red-X'd an otherwise correct dev deploy on 2026-08-18.
 2. **The standing bypass actor on `dev-to-main`** (user `26966411`,
    `bypass_mode: "always"`) should be removed. Untouched since 2026-08-11.
+3. **The dev DB-dump path is written but not proven** — `dump-production-db.yml`
+   plus the `db-dumps` container landed 2026-08-18. Neither the Terraform nor
+   the workflow has been run once. See the Open entry below for the three steps
+   that finish it.
+
+**Handoff to the devs, decided 2026-08-18.** The infra side is considered ready
+for the devs to start building the site out. The boundary that settled it: **if a
+setting lives in the app repo's `config/`, it is theirs; if it lives in Terraform,
+cloud-init or a workflow, it is ours.** Two live examples decided by that rule
+this day, both left for the devs deliberately:
+
+- **Cron has never run on this site, and nothing is set up to run it.** The
+  `automated_cron` module is not enabled (the `minimal` profile does not enable
+  it) and there is no crontab, systemd timer or `drush cron` anywhere in this
+  repo. Status report shows it as an error because `system.cron.yml` sets
+  `requirements_error: 1209600` — exactly 14 days, and the site is 14 days old.
+  **Real consequence: core `search` and `search_node` are enabled and index on
+  cron, so search has no index.** The `update` module is *not* enabled and no
+  feeds are configured, so neither of those usual worries applies here.
+  **lib-main solves this with `automated_cron` at `interval: 10800` (3 hours) —
+  app-repo config, no infra component at all**, which is what puts it on the dev
+  side of the line.
+- **The front end is unstyled and that is expected.** `system.theme.yml` has
+  `admin: gin`, `default: stark`. Stark is Drupal's deliberately unstyled theme,
+  so admin pages look right and every front-end page (`/user/1` included) renders
+  as raw HTML. Not a defect; there is simply no public theme yet. Claro is
+  already installed if a styled default is ever wanted.
+
+**Queued behind the devs:** Solr. lib-main runs `search_api` + `search_api_solr`
+against an external Solr; mccarthy uses core `search`. Adding Solr here is real
+infra work but it is pointless until there is content and a working search
+requirement.
+
+**The one thing the devs will break silently.** `az_blob_fs` is installed,
+configured, and **has never executed a single read or write on this site** —
+verified 2026-08-18: `record` has 18 field storages, all string / string_long /
+integer / entity_reference / datetime / boolean, and **zero file or image
+fields**. The day the first file or image field is added, someone must smoke-test
+upload and serve on devtest *and* set `uri_scheme: azblob` on the field. Miss the
+second step and files land on the VM's local disk, where the next reimage
+destroys them, with nothing logged.
 
 ---
 
 ## Open
+
+### Devs have no way to pull a production DB dump — written 2026-08-18, never run
+
+**Status: code exists, nothing has been applied or executed.** Do not treat this
+as working. The devs need production data in their local DDEV. lib-main's devs do
+this from Azure Cloud Shell with a bare `pg_dump`. **That method cannot work here,
+for two unrelated reasons**, so mccarthy needs its own path.
+
+**Blocker 1 — client major version.** lib-main's PostgreSQL is **16**; mccarthy's
+is **18** (both verified against Azure on 2026-08-18). Cloud Shell ships a
+**16** client, and `pg_dump` hard-refuses to read a server whose major version is
+newer than itself. There is no override flag; `--ignore-version` is long gone.
+This is the same constraint `build-on-dispatch.yml:291-305` already documents and
+works around by installing `postgresql-client-${PG_MAJOR}` from PGDG.
+
+**Blocker 2 — Cloud Shell no longer has root.** The obvious fix (install the 18
+client) fails: Cloud Shell now runs with the **`no new privileges`** flag, so
+every `sudo` returns *"sudo: The 'no new privileges' flag is set, which prevents
+sudo from running as root."* Confirmed by running it 2026-08-18. A no-root
+install into `$HOME` via `dpkg-deb -x` is possible and would persist (Cloud Shell
+keeps `$HOME` on a file share), but it leaves every dev hand-maintaining a
+toolchain inside a container Microsoft keeps changing.
+
+**Why laptops are not an option either.** Both `mccarthy-production-psql` and
+`mccarthy-devtest-psql` carry exactly one firewall rule, `AllowAzureServices`
+(`0.0.0.0`–`0.0.0.0`). **No client IPs are permitted at all.** lib-main allows
+laptop pulls via `db_allowed_ips`; mccarthy does not, so any dump must originate
+from inside Azure. That is tighter than lib-main, deliberately, and worth keeping.
+
+**Rejected: GitHub Actions artifacts.** The natural shape — a `workflow_dispatch`
+job that dumps and uploads the artifact — is **disqualified because
+`mccarthy-infra` and `mccarthy-index` are both PUBLIC repos**, so artifacts are
+downloadable by anyone who can see the Actions tab. A Drupal dump carries the
+`users` password hashes and `users_field_data` staff email addresses. Do not
+reach for artifacts here; the same idea is safe on a private repo and unsafe on
+this one, which is exactly the kind of difference that gets missed.
+
+**Chosen design, now written.** A `workflow_dispatch` workflow that dumps
+production and uploads to **private blob storage**, which is also what
+lib-main's own TODO proposes for when its database goes private:
+
+1. Container **`db-dumps`** in the devtest storage account
+   **`mccdevtesth6srb8na`**, private. The Actions SP already has access to that
+   account.
+2. `pg_dump --format=plain | gzip`. **Plain, not `--format=custom`** — the
+   existing dump in `build-on-dispatch.yml` uses custom because it feeds
+   `pg_restore`, but `ddev import-db` needs plain SQL.
+3. Each dev granted **`Storage Blob Data Reader` scoped to that container only**.
+   Per-person, auditable, revocable, and **no shared secret anywhere in the
+   flow** — no SAS token, no DB password handed out.
+4. A lifecycle rule deleting blobs after ~7 days, so production copies do not
+   accumulate.
+
+Dev loop: trigger the workflow → `az storage blob download --account-name
+mccdevtesth6srb8na --container-name db-dumps --name <file> --file <file>
+--auth-mode login` → `ddev import-db --src=<file>` → `ddev drush cr`.
+
+**No version mismatch on the restore side**: `.ddev/config.yaml` in
+`mccarthy-index` already pins `database.type: postgres`, `version: "18"`.
+
+**Note on the existing pattern, since it looks like an oversight and is not.**
+lib-main's Key Vault (`lib-main-kv-4ad11abb`) grants **no dev any access** —
+only the operator, the Actions SP and a managed identity, exactly like
+`mccarthy-kv-553468f1`. So lib-main's devs get the DB password out of band and
+let `pg_dump` prompt. The design above is a deliberate improvement on that, not a
+port of it: it removes the shared password rather than reproducing it.
+
+**Still on the dev's laptop afterwards:** staff emails and password hashes.
+`ddev drush sql:sanitize` scrubs them locally. Worth telling the devs; the
+workflow cannot do it for them.
+
+**What was written on 2026-08-18.**
+
+| File | What it adds |
+|---|---|
+| `modules/blob-storage/main.tf` | `db_dumps` container, an `expire-db-dumps` management policy, and `Storage Blob Data Reader` role assignments scoped to that container |
+| `modules/blob-storage/variables.tf` | `enable_db_dumps_container`, `db_dumps_container_name`, `db_dump_retention_days` |
+| `environments/devtest/` | turns the container on; `developer_identities` is the gitignored tfvars map of who may read it |
+| `.github/workflows/dump-production-db.yml` | the `workflow_dispatch` job itself |
+
+Four things in there are decisions rather than mechanics, and each has a comment
+at the site explaining it, because each is invisible from the code alone:
+
+- **The dump uploads with an account key, not `--auth-mode login`.** The Actions
+  SP holds control-plane Contributor on the resource groups and **no data-plane
+  role** on the devtest storage account — `bootstrap/azure-setup.sh` grants
+  `Storage Blob Data Contributor` on the *tfstate* account only. Contributor can
+  list keys, which is how `sync-blob-storage` in `build-on-dispatch.yml` already
+  works. Developers reading the blob back out use RBAC and `--auth-mode login`;
+  the key never reaches them.
+- **`set -o pipefail` in the dump step is load-bearing.** GitHub runs `run:`
+  blocks as `bash -e`, *not* `-o pipefail`. Without it, `gzip` succeeding would
+  mask a failed `pg_dump` and the job would upload a valid gzip of a truncated
+  dump — green, and wrong.
+- **The completeness check greps for pg_dump's end-of-dump marker**, not for a
+  size floor. A dump cut off mid-`COPY` is still large and still valid gzip; only
+  the marker proves it ran to the end. The second check is a bare
+  `^CREATE TABLE ` on purpose: an earlier draft asserted `CREATE TABLE
+  public.users`, which would red-X a good dump the moment a table prefix
+  appeared — the same defect shape as the cloud-init `warning` gate below.
+- **The per-developer media containers were deleted, and the account-scope
+  grant with them.** `developer_identities` used to create a
+  `drupal-media-<username>` container per dev plus `Storage Blob Data
+  Contributor` at **account** scope. Both are gone as of 2026-08-18. The
+  containers were never wired to anything: no workflow, no cloud-init and no
+  environment ever read them, the `dev_container_urls` output was never
+  consumed, and the map was empty, so nothing had ever been applied. The
+  account-scope grant was worse than unused — it defeated its own purpose. It
+  let every dev into every container on the account, `db-dumps` included, and it
+  meant removing a person from a narrower map would **not** revoke them. The
+  same map now grants `Storage Blob Data Reader` on `drupal-media` and on
+  `db-dumps`, both container-scoped. One list of developers, two read-only
+  grants, and a removal that actually removes.
+
+  Devs read the **same** `drupal-media` container the dev-merge workflow already
+  refreshes from production, so there is one copy of the media and no per-person
+  drift. If a dev ever needs to *write* media into devtest, that is a new
+  decision — do not reach back for account-scope Contributor.
+
+**Two things the 7-day retention does not mean.** Azure lifecycle management is
+a once-a-day best-effort sweep, documented at up to 48h of lag; and this account
+has blob soft delete on for 7 days, so a deleted dump stays recoverable after
+that. Real worst-case lifetime is nearer 16 days than 7.
+
+**Applied to devtest 2026-08-18: `2 added, 0 changed, 0 destroyed`.** The
+container `db-dumps` and the `expire-db-dumps` lifecycle rule now exist on
+`mccdevtesth6srb8na`. Verified against Azure rather than from the apply output:
+`publicAccess: None`; the rule is enabled and deletes `blockBlob` under prefix
+`db-dumps` at `daysAfterCreationGreaterThan: 7`. **Zero destroys is the useful
+number** — it confirms the deleted per-developer containers had genuinely never
+been created, so removing that code changed nothing live. `container-rm list`
+returns exactly `db-dumps` and `drupal-media`.
+
+Note also that the container's Terraform `id` came back as the Resource Manager
+ID (`.../blobServices/default/containers/db-dumps`), which is what the reader
+role assignments use as their scope. That was reasoned from the docs when the
+code was written; it is now observed.
+
+**One pre-existing identity can read this container.** `az role assignment list
+--include-inherited` on the account shows `Storage Blob Data Reader` at
+*subscription* scope for `c650e91b-ebdb-4091-8710-e2b5b055abbf`, which resolves
+to **`StorageDataScanner`** — the Microsoft-managed identity behind Defender for
+Storage. It is not a finding: this account carries a per-resource Defender
+override (`disable_defender_for_storage = true`), confirmed live as
+`isEnabled: false`, `overrideSubscriptionLevelSettings: true`, malware scanning
+and sensitive-data discovery both off. Worth writing down because the grant is
+inherited and invisible from a scope-only listing, and this container holds
+`users.pass` hashes.
+
+**Developers granted 2026-08-18: `8 added, 0 changed, 0 destroyed`.** Four
+people — `wveale`, `aalbro`, `dshaw11`, `mcheeti1` — each hold `Storage Blob
+Data Reader` on `db-dumps` and on `drupal-media`. Object IDs live only in the
+gitignored `environments/devtest/terraform.tfvars`; `git check-ignore` was run
+against that path before writing them, because they are personal identifiers in
+a public repo. This apply needed PIM Owner, unlike the container apply before
+it — Contributor cannot write role assignments.
+
+**The check that actually matters** is not the eight grants, it is the ninth
+result. `az role assignment list` at **account** scope returns *empty*: no
+developer holds anything above container level. That is the entire point of
+dropping the old account-scope Contributor, confirmed against Azure rather than
+inferred from the plan. If that listing ever returns a person again, the
+narrow-scope design has been quietly undone.
+
+**What is left:**
+
+1. Run the workflow once end to end and confirm a dev can actually download and
+   `ddev import-db` the result. **Production is deallocated outside business
+   hours** by `production-schedule.yml`; the workflow detects that and fails with
+   the remedy rather than timing out, but it does mean the first test has to
+   happen while production is up. The workflow file also has to reach `main`
+   before the Actions tab will offer it.
+
+Triggering also needs **write** access to `mccarthy-infra` — `workflow_dispatch`
+is not available to someone with read access only. If the devs are not given
+write here, the operator runs it on their behalf and they still download it
+themselves.
 
 ### The cloud-init log gate fails on the word `warning`, so a correct deploy reports red
 

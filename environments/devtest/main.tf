@@ -116,11 +116,20 @@ module "blob_storage" {
 
   disable_defender_for_storage = true
 
-  # Per-developer isolated media containers + RBAC for azcopy sync.
+  # Developers who may read devtest data: the shared drupal-media container and
+  # the db-dumps container below. Read-only, scoped per container.
   # AAD object IDs are personal identifiers and this repository is public, so
   # they live in the gitignored terraform.tfvars, not here.
   # Collect via: az ad user show --id <email> --query id -o tsv
   developer_identities = var.developer_identities
+
+  # Private container that .github/workflows/dump-production-db.yml writes
+  # production dumps into, so devs can seed their local DDEV. Neither Cloud
+  # Shell nor a laptop can reach the PostgreSQL servers directly, and Actions
+  # artifacts are unsafe here because both repos are public. See docs/TODO.md.
+  enable_db_dumps_container = true
+  db_dumps_container_name   = "db-dumps"
+  db_dump_retention_days    = 7
 
   tags = local.common_tags
 }

@@ -119,6 +119,7 @@ mccarthy-infra/
 │   ├── deploy-on-main-merge.yml   # drupal-main-merge -> production rolling deploy, destroy dev VM
 │   ├── deploy-production.yml      # manual rollback / emergency deploy
 │   ├── test-cloud-init.yml        # manual cloud-init iteration on an existing image
+│   ├── dump-production-db.yml     # manual -> production dump into private blob, for local DDEV
 │   └── production-schedule.yml    # nightly/weekend deallocate (cost control)
 ├── packer/
 │   ├── plugins.pkr.hcl

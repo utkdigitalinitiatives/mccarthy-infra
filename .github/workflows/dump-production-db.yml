@@ -1,0 +1,291 @@
+name: Dump Production Database
+
+# Hands a developer a production database dump they can load into local DDEV.
+#
+# WHY THIS EXISTS AT ALL. lib-main's devs pull their own dump from Azure Cloud
+# Shell with a bare `pg_dump`. That route is closed here, twice over:
+#   1. Cloud Shell ships a PostgreSQL 16 client. Ours is server 18, and pg_dump
+#      hard-refuses to read a server with a newer major than itself. There is no
+#      override flag; --ignore-version was removed years ago.
+#   2. Installing an 18 client in Cloud Shell fails too: it now runs with the
+#      `no new privileges` flag, so every sudo returns "sudo: The 'no new
+#      privileges' flag is set, which prevents sudo from running as root."
+# A laptop cannot substitute either. Both PostgreSQL servers carry exactly one
+# firewall rule, AllowAzureServices (0.0.0.0-0.0.0.0), so no client IP is
+# permitted at all. Any dump must originate from inside Azure. That is tighter
+# than lib-main, deliberately, and worth keeping.
+#
+# WHY NOT AN ARTIFACT. The obvious shape -- dump, then actions/upload-artifact --
+# is disqualified because mccarthy-infra and mccarthy-index are both PUBLIC, so
+# the artifact is downloadable by anyone who can see the Actions tab. A Drupal
+# dump carries users.pass hashes and users_field_data staff emails. The same
+# design is perfectly safe on a private repo, which is exactly the kind of
+# difference that gets missed. Do not "simplify" this back to an artifact.
+#
+# The dump therefore lands in a private blob container and each developer is
+# granted Storage Blob Data Reader on that container alone. No SAS token and no
+# database password ever leaves this workflow.
+#
+# Prerequisites, both set up in Terraform (environments/devtest):
+#   - enable_db_dumps_container = true creates the container and its 7-day
+#     expiry rule.
+#   - developer_identities maps each dev to their AAD object ID.
+# Triggering also needs write access to THIS repository; workflow_dispatch is
+# not available to someone with read access only.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  dump:
+    name: Dump Production Database
+    runs-on: ubuntu-latest
+    # Serialise rather than supersede. Each dump is uniquely named so a race
+    # would not overwrite anything, but two concurrent pg_dumps put avoidable
+    # load on the live production server.
+    concurrency:
+      group: production-db-dump
+      cancel-in-progress: false
+
+    env:
+      PROD_RG: ${{ vars.PROJECT_NAME }}-production-rg
+      PSQL_NAME: ${{ vars.PROJECT_NAME }}-production-psql
+      SECRETS_RG: ${{ vars.PROJECT_NAME }}-secrets-rg
+      DEVTEST_RG: ${{ vars.PROJECT_NAME }}-devtest-rg
+      PROD_HOST: ${{ vars.PROD_DB_HOST }}
+      DB_USER: ${{ vars.DB_ADMIN_USERNAME }}
+      DB_NAME: ${{ vars.DB_NAME }}
+      STORAGE_ACCOUNT: ${{ vars.DEVTEST_STORAGE_ACCOUNT }}
+      DUMP_CONTAINER: db-dumps
+      PG_MAJOR: ${{ vars.PG_MAJOR || '18' }}
+      PGSSLMODE: require
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Check production PostgreSQL is running
+        run: |
+          set -euo pipefail
+
+          # production-schedule.yml deallocates this server overnight and at
+          # weekends. Fail here with the remedy rather than 60 seconds later
+          # inside pg_dump with a connection timeout that reads like an outage.
+          #
+          # Retried because the Azure API returns transient GatewayTimeouts
+          # against a deallocated Flexible Server -- same reason
+          # production-schedule.yml retries.
+          STATE=""
+          for attempt in {1..5}; do
+            STATE=$(az postgres flexible-server show \
+              --resource-group "$PROD_RG" --name "$PSQL_NAME" \
+              --query state -o tsv 2>&1) && break
+            echo "Failed to query PostgreSQL state (attempt $attempt/5): $STATE"
+            sleep 15
+          done
+
+          if [ -z "$STATE" ] || echo "$STATE" | grep -qi "error"; then
+            echo "::error::Unable to query $PSQL_NAME after 5 attempts: $STATE"
+            exit 1
+          fi
+
+          if [ "$STATE" != "Ready" ]; then
+            echo "::error::$PSQL_NAME is '$STATE', not 'Ready'. Production is deallocated outside business hours. Run the 'Production Start/Stop Schedule' workflow with action=start, wait for it to finish, then re-run this one."
+            exit 1
+          fi
+
+          echo "Production PostgreSQL is Ready"
+
+      - name: Verify the dump container exists
+        run: |
+          set -euo pipefail
+
+          if [ -z "$STORAGE_ACCOUNT" ]; then
+            echo "::error::The DEVTEST_STORAGE_ACCOUNT repository variable is empty. Set it from the devtest stack's storage_account_name output."
+            exit 1
+          fi
+
+          # container-rm is the management-plane form, so this check needs only
+          # the Contributor role the service principal already holds -- no
+          # account key. Fails fast with the fix rather than letting the upload
+          # die on a ContainerNotFound at the end of a long dump.
+          EXISTS=$(az storage container-rm exists \
+            --storage-account "$STORAGE_ACCOUNT" \
+            --resource-group "$DEVTEST_RG" \
+            --name "$DUMP_CONTAINER" --query exists -o tsv)
+
+          if [ "$EXISTS" != "true" ]; then
+            echo "::error::Container '$DUMP_CONTAINER' does not exist in $STORAGE_ACCOUNT. Apply environments/devtest with enable_db_dumps_container = true first."
+            exit 1
+          fi
+
+          echo "Container $DUMP_CONTAINER is present"
+
+      - name: Install the PostgreSQL client
+        run: |
+          set -euo pipefail
+
+          # Ubuntu 24.04 ships client 16, and pg_dump hard-refuses to read a
+          # server with a newer major than itself, so the distro default cannot
+          # dump our PostgreSQL 18 server. Install from PGDG pinned to PG_MAJOR.
+          #
+          # PG_MAJOR is the single source of truth: it also feeds
+          # TF_VAR_postgresql_version in the production deploys, so the client
+          # and the server cannot drift apart. Its fallback mirrors the
+          # Terraform default in modules/postgresql/variables.tf. Identical to
+          # the block in build-on-dispatch.yml.
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --yes --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "postgresql-client-${PG_MAJOR}"
+
+          pg_dump --version
+
+      - name: Dump production
+        id: dump
+        run: |
+          set -euo pipefail
+
+          STAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+          DUMP_FILE="drupal-${STAMP}.sql.gz"
+          echo "dump_file=$DUMP_FILE" >> "$GITHUB_OUTPUT"
+
+          # Production and devtest have SEPARATE admin passwords; only
+          # production's is needed here.
+          KV_NAME=$(az keyvault list -g "$SECRETS_RG" --query "[0].name" -o tsv)
+          PROD_DB_PASSWORD=$(az keyvault secret show --vault-name "$KV_NAME" \
+            --name production-db-admin-password --query value -o tsv)
+          echo "::add-mask::$PROD_DB_PASSWORD"
+
+          # PLAIN format, not --format=custom. The dump in build-on-dispatch.yml
+          # uses custom because it feeds pg_restore; `ddev import-db` needs plain
+          # SQL. Do not copy the flags across.
+          #
+          # Cache, session and log table DATA is excluded -- the schemas are
+          # still dumped, so the tables exist and Drupal repopulates them. This
+          # is what keeps the file small; it is not an attempt at sanitising.
+          #
+          # `set -o pipefail` above is load-bearing: without it gzip's success
+          # would hide a failed pg_dump and this would upload a valid gzip of a
+          # truncated dump.
+          PGPASSWORD="$PROD_DB_PASSWORD" \
+            pg_dump -h "$PROD_HOST" -U "$DB_USER" -d "$DB_NAME" \
+              --format=plain --no-owner --no-acl \
+              --exclude-table-data='cache_*' \
+              --exclude-table-data='sessions' \
+              --exclude-table-data='watchdog' \
+            | gzip -9 > "$DUMP_FILE"
+
+          ls -lh "$DUMP_FILE"
+
+      - name: Verify the dump is complete
+        env:
+          DUMP_FILE: ${{ steps.dump.outputs.dump_file }}
+        run: |
+          set -euo pipefail
+
+          gzip -t "$DUMP_FILE"
+
+          # pg_dump's plain output always ends with this marker. Its presence
+          # proves the dump ran to completion, which a size check alone cannot:
+          # a dump cut off mid-COPY is still large and still valid gzip.
+          if ! zcat "$DUMP_FILE" | tail -5 | grep -q 'PostgreSQL database dump complete'; then
+            echo "::error::$DUMP_FILE is missing pg_dump's end-of-dump marker; it is truncated. Not uploading."
+            exit 1
+          fi
+
+          # Deliberately generic. An earlier draft asserted `CREATE TABLE
+          # public.users`, which would red-X a perfectly good dump the moment a
+          # table prefix or a schema rename appeared -- the same shape of bug as
+          # the cloud-init gate that fails on the word "warning". A dump with no
+          # CREATE TABLE at all is the only case worth blocking on.
+          if ! zcat "$DUMP_FILE" | grep -q '^CREATE TABLE '; then
+            echo "::error::$DUMP_FILE contains no tables. Wrong or empty database. Not uploading."
+            exit 1
+          fi
+
+          echo "Dump verified: complete, and contains a schema"
+
+      - name: Upload to private blob storage
+        env:
+          DUMP_FILE: ${{ steps.dump.outputs.dump_file }}
+        run: |
+          set -euo pipefail
+
+          # Authenticated with the account key, not --auth-mode login, because
+          # the Actions service principal holds control-plane Contributor on the
+          # resource groups and NO data-plane role on this storage account.
+          # (bootstrap/azure-setup.sh grants Storage Blob Data Contributor on the
+          # tfstate account only.) Contributor can list keys, which is how the
+          # blob sync job in build-on-dispatch.yml works too. Developers reading
+          # the blob back out use RBAC and --auth-mode login; they never see this.
+          KEY=$(az storage account keys list \
+            --account-name "$STORAGE_ACCOUNT" \
+            --query "[0].value" -o tsv)
+          echo "::add-mask::$KEY"
+
+          az storage blob upload \
+            --account-name "$STORAGE_ACCOUNT" --account-key "$KEY" \
+            --container-name "$DUMP_CONTAINER" \
+            --name "$DUMP_FILE" --file "$DUMP_FILE" \
+            --overwrite false \
+            --output none
+
+          echo "Uploaded $DUMP_FILE"
+
+      - name: Summary
+        env:
+          DUMP_FILE: ${{ steps.dump.outputs.dump_file }}
+        run: |
+          SIZE=$(du -h "$DUMP_FILE" | cut -f1)
+
+          {
+            echo "## Production dump ready"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| File | \`$DUMP_FILE\` |"
+            echo "| Size | $SIZE |"
+            echo "| Account | \`$STORAGE_ACCOUNT\` |"
+            echo "| Container | \`$DUMP_CONTAINER\` |"
+            echo ""
+            echo "Expires automatically after 7 days."
+            echo ""
+            echo "### Load it into DDEV"
+            echo ""
+            echo '```bash'
+            echo "az login"
+            echo "az storage blob download \\"
+            echo "  --account-name $STORAGE_ACCOUNT \\"
+            echo "  --container-name $DUMP_CONTAINER \\"
+            echo "  --name $DUMP_FILE \\"
+            echo "  --file $DUMP_FILE \\"
+            echo "  --auth-mode login"
+            echo ""
+            echo "ddev import-db --src=$DUMP_FILE"
+            echo "ddev drush cr"
+            echo '```'
+            echo ""
+            echo "### Then scrub it"
+            echo ""
+            echo "This dump holds real password hashes and real staff email addresses."
+            echo "Nothing in this workflow can remove them for you. On your laptop, run:"
+            echo ""
+            echo '```bash'
+            echo "ddev drush sql:sanitize"
+            echo '```'
+            echo ""
+            echo "\`az storage blob download\` failing with AuthorizationPermissionMismatch means"
+            echo "you have not been granted Storage Blob Data Reader on the container yet."
+            echo "Ask the infra operator to add your AAD object ID to \`developer_identities\`."
+          } >> "$GITHUB_STEP_SUMMARY"

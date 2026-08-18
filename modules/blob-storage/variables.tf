@@ -154,8 +154,39 @@ variable "additional_principal_ids" {
   default = {}
 }
 
+# --- Production database dumps (devtest only) ---------------------------------
+
+variable "enable_db_dumps_container" {
+  description = "Create the private db-dumps container, its expiry policy and the reader role assignments. Devtest only."
+  type        = bool
+  default     = false
+}
+
+variable "db_dumps_container_name" {
+  description = "Name of the private container holding production database dumps"
+  type        = string
+  default     = "db-dumps"
+}
+
+variable "db_dump_retention_days" {
+  description = "Delete dumps this many days after creation. Lifecycle management is a daily best-effort sweep and blob soft delete applies on top, so the real lifetime is longer."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.db_dump_retention_days >= 1 && var.db_dump_retention_days <= 99999
+    error_message = "db_dump_retention_days must be between 1 and 99999."
+  }
+}
+
 variable "developer_identities" {
-  description = "Map of developer username -> Azure AD object ID. Each gets an isolated drupal-media-<username> container plus Storage Blob Data Contributor on the storage account for azcopy sync. Devtest only."
+  description = <<-EOT
+    Map of developer username -> Azure AD object ID. Each gets Storage Blob Data
+    Reader on the media container, and on the db-dumps container when that is
+    enabled. Container-scoped and read-only, so removing someone here actually
+    revokes them. Devtest only - never pass this to the production stack.
+    Kept out of git (public repo) - set in terraform.tfvars.
+  EOT
   type        = map(string)
   default     = {}
 }

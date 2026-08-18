@@ -32,3 +32,8 @@ output "storage_container_name" {
   description = "Name of the blob container"
   value       = module.blob_storage.container_name
 }
+
+output "db_dumps_container_name" {
+  description = "Private container holding production database dumps"
+  value       = module.blob_storage.db_dumps_container_name
+}

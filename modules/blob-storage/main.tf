@@ -131,19 +131,22 @@ resource "azurerm_storage_container" "media" {
   container_access_type = "private"
 }
 
-# Per-developer isolated media containers (devtest only)
-resource "azurerm_storage_container" "dev_media" {
-  for_each              = var.developer_identities
-  name                  = "drupal-media-${each.key}"
-  storage_account_id    = azurerm_storage_account.drupal.id
-  container_access_type = "private"
-}
-
-# Grant developers Storage Blob Data Contributor for azcopy sync (AAD auth)
-resource "azurerm_role_assignment" "dev_blob_contributor" {
+# Developer read access to the shared devtest media container.
+#
+# Scoped to the CONTAINER and read-only, both deliberately. An earlier version
+# gave each developer their own drupal-media-<username> container plus Storage
+# Blob Data Contributor at ACCOUNT scope. That was removed on 2026-08-18: the
+# per-dev containers were never wired to anything and always empty, and the
+# account-scope grant defeated its own purpose -- it let every developer into
+# every other container on the account, including one holding production
+# database dumps, and made removing someone from this map fail to revoke them.
+#
+# The devs read the SAME container the dev-merge workflow refreshes from
+# production, so there is one copy of the media and no per-person drift.
+resource "azurerm_role_assignment" "dev_media_reader" {
   for_each             = var.developer_identities
-  scope                = azurerm_storage_account.drupal.id
-  role_definition_name = "Storage Blob Data Contributor"
+  scope                = azurerm_storage_container.media.id
+  role_definition_name = "Storage Blob Data Reader"
   principal_id         = each.value
 }
 
@@ -187,4 +190,78 @@ resource "azurerm_private_endpoint" "blob" {
   }
 
   tags = local.common_tags
+}
+
+# ------------------------------------------------------------------------------
+# Production database dumps (devtest only)
+# ------------------------------------------------------------------------------
+# Devs have no other route to production data. Both PostgreSQL servers carry a
+# single firewall rule, AllowAzureServices (0.0.0.0-0.0.0.0), so no laptop can
+# reach them; and Azure Cloud Shell ships a PG 16 client that hard-refuses to
+# read our PG 18 server, with no way to install a newer one because Cloud Shell
+# now runs with the `no new privileges` flag and every sudo fails.
+#
+# GitHub Actions artifacts are NOT an alternative: mccarthy-infra and
+# mccarthy-index are both PUBLIC, so an artifact holding users.pass hashes and
+# users_field_data staff emails would be downloadable by anyone who can see the
+# Actions tab. Hence a private container plus per-person RBAC.
+#
+# Written by .github/workflows/dump-production-db.yml.
+resource "azurerm_storage_container" "db_dumps" {
+  count                 = var.enable_db_dumps_container ? 1 : 0
+  name                  = var.db_dumps_container_name
+  storage_account_id    = azurerm_storage_account.drupal.id
+  container_access_type = "private"
+}
+
+# Expire dumps so production copies do not accumulate.
+#
+# Two caveats worth knowing before trusting the number:
+#   - Lifecycle management is a once-a-day best-effort sweep. Azure documents up
+#     to 48h between a blob ageing out and actually being deleted.
+#   - This account has blob soft delete on (var.soft_delete_retention_days), so a
+#     deleted dump stays recoverable for that many days afterwards.
+# Real worst-case lifetime is therefore retention + soft delete + a day or two.
+#
+# A storage account may hold exactly ONE management policy ("default"). Anything
+# else needing lifecycle rules on this account must add a `rule` block here
+# rather than a second azurerm_storage_management_policy resource.
+resource "azurerm_storage_management_policy" "db_dumps" {
+  count              = var.enable_db_dumps_container ? 1 : 0
+  storage_account_id = azurerm_storage_account.drupal.id
+
+  rule {
+    name    = "expire-db-dumps"
+    enabled = true
+
+    filters {
+      # Bare container name matches every blob inside it.
+      prefix_match = [var.db_dumps_container_name]
+      blob_types   = ["blockBlob"]
+    }
+
+    actions {
+      base_blob {
+        delete_after_days_since_creation_greater_than = var.db_dump_retention_days
+      }
+    }
+  }
+}
+
+# Developer read access to the dumps, on the same map as the media grant above.
+# One list of developers, two container-scoped read-only grants. No shared
+# secret travels with either: the dev signs in as themselves (`az login`) and
+# reads with --auth-mode login. Nobody is handed a SAS token, a storage account
+# key, or the database password.
+#
+# `.id` is the Resource Manager ID -- containers declared with
+# storage_account_id (rather than the deprecated storage_account_name) use the
+# Resource Manager API, and the resource documents import by that same ID. The
+# `resource_manager_id` attribute is the deprecated spelling of it and is gone
+# in provider 5.x. `.url` is the data-plane URL and is NOT a valid role scope.
+resource "azurerm_role_assignment" "dev_db_dumps_reader" {
+  for_each             = var.enable_db_dumps_container ? var.developer_identities : {}
+  scope                = azurerm_storage_container.db_dumps[0].id
+  role_definition_name = "Storage Blob Data Reader"
+  principal_id         = each.value
 }
