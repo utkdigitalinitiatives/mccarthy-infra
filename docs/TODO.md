@@ -8,7 +8,98 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
+## Work in flight — nothing blocking as of 2026-08-18
+
+**The 11.4.5 security update is deployed to production and verified on the box.**
+The GitHub outage that paused this on 2026-08-17 cleared; every step in the old
+resume list is done. What is left are two cleanups, neither urgent.
+
+| What | State |
+|---|---|
+| `mccarthy-index` PR #7, `security/drupal-11.4.5` → `dev` | merged `6816503`, 2026-08-18 12:07Z |
+| `mccarthy-index` PR #8, `dev` → `main` | merged 2026-08-18 12:37Z |
+| `build-on-dispatch.yml` run `32135176539` | all four jobs did their real work; reports red, see below |
+| `deploy-on-main-merge.yml` run `32137792054` | green, 7m11s, dev VM cleaned up |
+| Production | image **`0.0.7`**, Drupal **11.4.5** |
+| SA-CORE-2026-010 / -011 / -012 | cleared |
+
+Both merges again needed `gh pr merge --admin`. `dev-review` has no bypass actor,
+and the `dev-to-main` bypass actor still does not satisfy an API merge — the same
+behaviour seen on PRs #5 and #6.
+
+**How production was verified, since a green run is not proof here.** `/user/login`
+returned 200 rendering `user_login_form` with title `Log in | Cormac Index`; HTTP
+301'd to HTTPS; the VMSS model *and* the running instance both reported image
+`0.0.7`; `mccarthy-dev-rg` survived the cleanup; and
+`drush status --field=drupal-version` run on the instance returned `11.4.5`. The
+site does not expose its version to an anonymous request — correct behaviour, but
+it means the version cannot be confirmed from outside and needs
+`az vmss run-command invoke`.
+
+**The certificate survived the reimage.** Serial
+`0622AB63B506FB5D893F7BAAB1D18B855202`, notAfter 2026-11-09, identical before and
+after. The blob restore branch restored rather than reissued, for the second
+consecutive reimage.
+
+**Left to do:**
+
+1. **The cloud-init log gate fails on the word `warning`** — see the Open entry
+   directly below. It red-X'd an otherwise correct dev deploy on 2026-08-18.
+2. **The standing bypass actor on `dev-to-main`** (user `26966411`,
+   `bypass_mode: "always"`) should be removed. Untouched since 2026-08-11.
+
+---
+
 ## Open
+
+### The cloud-init log gate fails on the word `warning`, so a correct deploy reports red
+
+**Found 2026-08-18 on run `32135176539` of `build-on-dispatch.yml`, the run that
+deployed 11.4.5 to dev. This is not a deploy defect — the site was right. The
+gate is the defect.**
+
+`build-on-dispatch.yml:526` surfaces the cloud-init log with
+
+```
+grep -iE '(error|fatal|fail|warning)' /var/log/cloud-init-output.log
+```
+
+and fails the job whenever grep matches. `warning` sits in that alternation, so
+any benign warning anywhere in a boot fails the deploy. On this run it matched
+exactly two lines, both harmless:
+
+- `req warning: No value provided for subject name attribute "O", skipped` —
+  openssl declining to fill an empty subject field while it generates the
+  placeholder self-signed certificate. Expected on every boot.
+- `[warning] Schema information for module az_blob_fs was missing from the
+  database.` — drush narrating its own work partway through `en az_blob_fs`.
+  **Checked afterwards on the VM: the `system.schema` row for `az_blob_fs` is
+  present and `updatedb:status` reports no updates required.** The warning
+  describes a state that existed mid-command and did not exist when the command
+  finished.
+
+Everything the run actually asserts about the site passed, including the new
+Drupal gate on its first ever execution. Verified independently against the dev
+VM: HTTPS `/health` 200, HTTPS `/user/login` 200 rendering `user_login_form`,
+title `Log in | Cormac Index`, HTTP 301 to HTTPS, and both `composer.lock` and
+`drush status` reporting 11.4.5.
+
+**Why this matters more than it looks.** The standing rule in this repo is that a
+green run is not proof — see "A note on first runs". The mirror image costs just
+as much: a red run that is not a failure trains you to skim past red. That is the
+exact habit that let the 2026-08-11 TLS outage sit behind a green check for 25
+minutes. A gate that cries wolf on every boot is worse than no gate, because it
+spends the attention that a real gate needs.
+
+**The fix** is to drop `warning` from the alternation, leaving
+`(error|fatal|fail)`, and — if warnings are still wanted for diagnosis — write
+them to the step summary without failing the job. Not done. The deploy was let
+through as it stood because the site had been verified by hand.
+
+**This gate exists only in `build-on-dispatch.yml`.** `deploy-on-main-merge.yml`
+has no equivalent step, which is why the production promotion later the same day
+reported green. Do not assume a fix here covers production; production has no
+cloud-init log gate at all, which is its own gap.
 
 ### `config:import` cannot install az_blob_fs — the first deploy of the blob wiring broke dev while its health check passed
 
@@ -681,8 +772,11 @@ Run `composer audit --locked` before any image build that matters. Note plain
 absent; `--locked` is what audits the lock file itself.
 
 **Lock updated 2026-08-17 on `mccarthy-index` branch `security/drupal-11.4.5`
-(commit `a1b0dcd`, cut from `dev`). Not merged, not deployed.** The advisories
-are cleared but nothing has run the new code yet.
+(commit `a1b0dcd`, cut from `dev`). Merged and deployed to production
+2026-08-18** — PR #7 into `dev` (`6816503`), PR #8 promoting `dev → main`, image
+`0.0.7`, `drush status` on the production instance reporting **11.4.5**. The
+standing lesson below is what keeps this entry in Open; the 11.4.5 work itself is
+finished.
 
 - `composer update "drupal/core-*" --with-all-dependencies` resolved core to
   **11.4.5**, not 11.4.4 — a newer patch in the same series, which contains the
@@ -704,10 +798,15 @@ are cleared but nothing has run the new code yet.
 
 This was deliberately left for its own dev cycle rather than riding along with
 the pipeline shakeout — a core bump is a real upgrade with config and schema
-implications, unlike a transitive library bump. It is also the first deploy that
-the new TLS and Drupal gates will guard, so **push the workflow changes to
-`mccarthy-infra` `main` before merging this to `dev`**, or the build will run
-under the old blind check.
+implications, unlike a transitive library bump. That sequencing held: the
+workflow changes were on `mccarthy-infra` `main` (`19c02a1`) before the merge, so
+the deploy ran under the new gates rather than the old blind check, and both
+gates passed on their first execution. `updatedb:status` on dev reported no
+database updates required, so the bump carried no schema work.
+
+**The standing lesson, which does not expire:** Dependabot will not tell you
+about the next core advisory either. `composer audit --locked` is the only thing
+that will. Run it on a schedule, not on a hunch.
 
 ---
 
@@ -1081,23 +1180,28 @@ checkable fact — that two secrets match, that a resource will be adopted, that
 scope is wide enough, that a file has been uploaded — check it rather than
 trusting it.
 
-Paths that have still never executed, as of 2026-08-13:
+**2026-08-18 added the inverse failure mode, and it belongs beside the 2026-08-11
+one.** That day a green run hid a broken site. This day a red run hid a correct
+one: `build-on-dispatch.yml` run `32135176539` ran all four jobs, every one did
+its real work, the new Drupal gate passed on its first execution — and the run
+reports red, because its last step fails on the word `warning`. See the Open
+entry on that gate. Both directions cost the same thing: they move the decision
+away from the site and onto the checkmark. The rule survives unchanged in both
+directions — **check what the run was supposed to produce.**
 
-- **`build-on-dispatch.yml` green end to end.** As of 2026-08-13 every job in it
-  has run from a dispatch — `Prepare Database` passed with its own copy of the
-  password fix for the first time — but the run went red in `Deploy Dev` on the
-  cloud-init log gate (the config:import entry above), so a fully green
-  dispatch-driven run has still never happened. The next merge to `dev` is that
-  first run, now with the fixed cloud-init.
+**The TLS gate also ran for the first time on 2026-08-18**, on the production
+promotion (run `32137792054`), and the blob restore returned the *same*
+certificate serial `0622AB63…5202` for the second consecutive reimage. The
+2026-08-11 failure mode has not recurred.
 
-No longer on this list as of the 2026-08-13 production promotion (run
-`31720848832`): the **blob restore branch of `tls-setup.sh`** (restored the
-existing cert — same serial before and after) and the **cloud-init pre-install
-block** (first render, ran clean against the no-modules production DB). Both
-were first runs that worked.
-- **The blob restore branch of `tls-setup.sh`.** It has run twice and found an
-  empty container both times. `tls-certs` is populated as of 2026-08-11, so the
-  next reimage is the first time it will actually restore a certificate.
+Earlier, the 2026-08-13 production promotion (run `31720848832`) took two paths
+off this list on their first try: the **blob restore branch of `tls-setup.sh`**
+(restored the existing cert, same serial before and after) and the **cloud-init
+pre-install block** (first render, ran clean against the no-modules production
+DB).
+
+Paths that have still never executed, as of 2026-08-18:
+
 - `deploy-production.yml` in full.
 - The `pr_number` / per-PR ephemeral variant of the dev stack. It is vestigial —
   no workflow sets `TF_VAR_pr_number` — and it could not work as written anyway,
