@@ -87,9 +87,31 @@ variable "image_name" {
 }
 
 variable "image_version" {
-  description = "Version of the image to deploy (e.g., 1.0.0)"
+  description = <<-EOT
+    Version of the app image to deploy, e.g. 0.0.7, or the literal "latest" to
+    resolve the newest version published to the gallery.
+
+    Deliberately has NO default, and is deliberately absent from
+    terraform.tfvars. It used to default to "1.0.0" while tfvars pinned "0.0.4",
+    the vanilla bootstrap image. Any manual apply that forgot -var would
+    therefore have reimaged production three builds backwards, from a plan that
+    looked entirely normal. A missing value stops Terraform and asks; a stale
+    value says nothing. Same reasoning, and the same fix, as
+    packer/variables.pkr.hcl's base_image_version.
+
+    Every CI path already passes this explicitly -- deploy-on-main-merge.yml:155
+    and deploy-production.yml:89 are the only two that touch this environment --
+    so removing the default costs CI nothing.
+
+    See also check "image_version_is_newest" in main.tf, which warns when this
+    is not the newest published version.
+  EOT
   type        = string
-  default     = "1.0.0"
+
+  validation {
+    condition     = can(regex("^([0-9]+\\.[0-9]+\\.[0-9]+|latest)$", var.image_version))
+    error_message = "image_version must be a three-part version such as 0.0.7, or the literal \"latest\"."
+  }
 }
 
 # --- Networking ----------------------------------------------------------------

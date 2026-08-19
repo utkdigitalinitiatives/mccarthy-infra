@@ -146,6 +146,42 @@ data "azurerm_shared_image_version" "drupal" {
   resource_group_name = var.gallery_resource_group_name
 }
 
+# Staleness guard for the image version.
+#
+# The version is a moving target -- every app build publishes a new one -- and
+# the old failure mode was silent: a forgotten -var took the tfvars value and
+# reimaged production backwards from a plan that read as normal. var.image_version
+# now has no default, so a missing value is a hard stop. This is the second half:
+# it catches a value that is present but stale.
+#
+# "latest" resolves the newest version published to this image definition. The
+# name attribute is not reliably the resolved version when "latest" is requested,
+# so read the last segment of the resource ID instead.
+data "azurerm_shared_image_version" "newest" {
+  count               = var.use_gallery_image ? 1 : 0
+  name                = "latest"
+  image_name          = var.image_name
+  gallery_name        = var.gallery_name
+  resource_group_name = var.gallery_resource_group_name
+}
+
+# A check block warns, it does not fail. That is deliberate: holding production
+# on a known-good build while a newer one is investigated is legitimate, and a
+# gate that blocks it would get worked around. The point is that deploying a
+# non-newest image becomes a decision you can see, instead of an accident.
+check "image_version_is_newest" {
+  assert {
+    condition = !var.use_gallery_image || var.image_version == "latest" || var.image_version == basename(data.azurerm_shared_image_version.newest[0].id)
+    error_message = format(
+      "image_version is %q, but the newest %s published to gallery %s is %q. Expected if you are deliberately holding a known-good build; otherwise this apply reimages production onto an older image.",
+      var.image_version,
+      var.image_name,
+      var.gallery_name,
+      basename(data.azurerm_shared_image_version.newest[0].id),
+    )
+  }
+}
+
 # Networking: VNet, subnets, NSG with Load Balancer rules
 module "networking" {
   source = "../../modules/networking"

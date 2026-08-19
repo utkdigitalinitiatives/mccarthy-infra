@@ -901,6 +901,61 @@ lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 
 ## Resolved
 
+### A stale `image_version` in tfvars could silently reimage production backwards — guarded 2026-08-19
+
+**Found while applying the private files share.** `environments/production/terraform.tfvars`
+pinned `image_version = "0.0.4"` — the vanilla bootstrap image — while production
+had been running `0.0.7` since 2026-08-18. `variables.tf` separately defaulted it
+to `"1.0.0"`. Any manual `terraform apply` in that directory that forgot
+`-var="image_version=..."` would have reimaged production three builds backwards,
+**from a plan that read as completely normal**: one in-place VMSS change, no
+destroys. The private-files apply was run with the pin, so nothing was harmed.
+
+**The old mitigation was a comment in the file telling you to override it.** It
+had been there since bootstrap, and on 2026-08-19 the value it guarded was four
+builds stale. That is the whole lesson: a comment is documentation, not a guard,
+and this repo has now been bitten twice by a comment asserting something untrue
+(see the 2026-08-10 pair under "A note on first runs").
+
+**The fix is two independent halves, because they catch different mistakes.**
+
+| Half | Where | Catches |
+|---|---|---|
+| No default, and no value in tfvars | `environments/production/variables.tf`, `terraform.tfvars` | a **missing** value — Terraform hard-stops with "No value for required variable" instead of using a stale one |
+| `check "image_version_is_newest"` | `environments/production/main.tf` | a **present but stale** value — warns when the requested version is not the newest published to the gallery |
+
+The check resolves the newest version with a second
+`data "azurerm_shared_image_version"` at `name = "latest"`, and reads
+`basename(...id)` rather than `.name`, because the `name` attribute is not
+reliably the resolved version when `latest` is requested.
+
+**The check warns rather than fails, deliberately.** Holding production on a
+known-good build while a newer one is investigated is legitimate, and a hard gate
+on that would simply get bypassed — the same reasoning that makes the
+`warning`-matching cloud-init gate above a defect. The goal is that a non-newest
+deploy is a visible decision, not an accident.
+
+**Precedent, and why this shape.** `packer/variables.pkr.hcl:49` already solves
+the identical bug for `base_image_version` by refusing to have a default, with a
+comment explaining that lib-main's stale default builds silently on an ancient
+base. `environments/dev` already carries no `image_version` in its tfvars either.
+Production was the outlier.
+
+**Verified 2026-08-19, all four paths:**
+
+| Input | Result |
+|---|---|
+| no `-var` | `Error: No value for required variable` |
+| `-var="image_version=0.0.7"` | `No changes.`, no warning |
+| `-var="image_version=0.0.4"` | `Plan: 0 to add, 1 to change` **plus** `Warning: Check block assertion failed` |
+| `-var="image_version=banana"` | `Error: Invalid value for variable` |
+
+**No CI change was needed.** Only `deploy-on-main-merge.yml:155` and
+`deploy-production.yml:89` run Terraform against this environment, and both
+already pass `-var="image_version=..."` explicitly; their applies consume a saved
+plan file.
+
+
 ### Durable `private://` storage via Azure Files — applied and verified 2026-08-19
 
 **Status: mounted, labelled and serving on production.** Written 2026-08-18,
