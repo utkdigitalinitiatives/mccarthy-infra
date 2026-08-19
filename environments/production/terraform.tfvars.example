@@ -21,10 +21,20 @@ gallery_name                = "lib_main_gallery"
 gallery_resource_group_name = "lib-main-images-rg"
 image_name                  = "mccarthy-rocky-linux-9"
 
-# WARNING: this value is a footgun for manual applies. Always pass
-# -var="image_version=<currently running version>" on the command line; CI
-# overrides it explicitly, but a stale value here will reimage production.
-image_version = "0.0.1"
+# image_version is deliberately NOT set here, and has no default in variables.tf.
+# Do not add it back. It used to be pinned with a comment warning you to override
+# it; the comment did not work -- on 2026-08-19 production ran 0.0.7 while the
+# real tfvars still said 0.0.4, so a manual apply that forgot -var would have
+# rolled the site back three builds from a normal-looking plan.
+#
+# Pass it on every manual run, matching what production is actually on:
+#   terraform plan -var="image_version=0.0.7"
+# Confirm the running version first:
+#   az vmss list-instances -g mccarthy-production-rg -n mccarthy-production-vmss \
+#     --query "[].storageProfile.imageReference.exactVersion" -o tsv
+#
+# CI always passes it explicitly. main.tf also carries a check block that warns
+# when the requested version is not the newest published to the gallery.
 
 # --- Site ----------------------------------------------------------------------
 # Do NOT generate a new UUID. Copy the `uuid` value out of the app repo's
