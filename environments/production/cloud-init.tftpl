@@ -97,6 +97,7 @@ write_files:
       ENV_NAME="${env_name}"
       HASH_SALT_SECRET="${hash_salt_secret_name}"
       STORAGE_KEY_SECRET="${storage_key_secret_name}"
+      PRIVATE_STORAGE_KEY_SECRET="${private_files_key_secret_name}"
       ENV_PHP="/etc/drupal/environment.php"
       SECRETS_ENV="/etc/drupal/secrets.env"
       LOG_FILE="/var/log/drupal-init.log"
@@ -129,12 +130,16 @@ write_files:
       DB_PASSWORD=""
       HASH_SALT=""
       STORAGE_KEY=""
+      PRIVATE_STORAGE_KEY=""
       for attempt in $(seq 1 18); do
         TOKEN=$(get_token || true)
         if [ -n "$TOKEN" ]; then
           DB_PASSWORD=$(fetch_secret "$ENV_NAME-db-admin-password" "$TOKEN" || true)
           HASH_SALT=$(fetch_secret "$HASH_SALT_SECRET" "$TOKEN" || true)
           STORAGE_KEY=$(fetch_secret "$STORAGE_KEY_SECRET" "$TOKEN" || true)
+          # Best-effort: the private-files mount is non-fatal by design, so this
+          # secret is deliberately NOT part of the required set gating the loop.
+          PRIVATE_STORAGE_KEY=$(fetch_secret "$PRIVATE_STORAGE_KEY_SECRET" "$TOKEN" || true)
           [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && break
         fi
         log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
@@ -164,6 +169,7 @@ write_files:
       umask 077
       cat > "$SECRETS_ENV" <<EOF
       DB_PASSWORD=$DB_PASSWORD
+      PRIVATE_STORAGE_KEY=$PRIVATE_STORAGE_KEY
       EOF
       chmod 640 "$SECRETS_ENV"
       chown root:drupal "$SECRETS_ENV"
@@ -334,6 +340,89 @@ write_files:
       fi
 
       log "Drupal initialization finished"
+
+  # Mount the Azure Files share backing Drupal's private:// filesystem over
+  # /var/www/drupal/private (the path the base image bakes into settings.php as
+  # file_private_path). This replaces the ephemeral per-instance local directory
+  # with durable, shared storage so editor-only webform/media uploads survive
+  # VMSS reimages and stay consistent across rolling-deploy surge instances.
+  # Non-fatal by design: on any failure the site still boots and private://
+  # falls back to the empty local directory, loudly logged for monitoring.
+  - path: /opt/mount-private-files.sh
+    permissions: '0750'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -uo pipefail
+
+      STORAGE_ACCOUNT="${private_files_account}"
+      SHARE_NAME="${private_files_share}"
+      MOUNT_POINT="/var/www/drupal/private"
+      CRED_DIR="/etc/smbcredentials"
+      CRED_FILE="$CRED_DIR/$STORAGE_ACCOUNT.cred"
+      LOG_FILE="/var/log/drupal-init.log"
+
+      log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [mount-private] $1" | tee -a "$LOG_FILE"
+      }
+
+      # PRIVATE_STORAGE_KEY (dedicated private-files account, not the media
+      # account) was persisted to secrets.env by /opt/fetch-secrets.sh via the
+      # Key Vault managed identity.
+      # shellcheck disable=SC1091
+      source /etc/drupal/secrets.env
+      if [ -z "$${PRIVATE_STORAGE_KEY:-}" ]; then
+        log "ERROR: PRIVATE_STORAGE_KEY unavailable; skipping mount. private:// falls back to ephemeral local dir."
+        exit 0
+      fi
+
+      # cifs-utils is baked into the shared base image from 2026.08.1 onward;
+      # install on demand for older ones.
+      if ! rpm -q cifs-utils >/dev/null 2>&1; then
+        log "Installing cifs-utils..."
+        dnf install -y cifs-utils 2>&1 | tail -1 | tee -a "$LOG_FILE" || {
+          log "ERROR: cifs-utils install failed; skipping private files mount."
+          exit 0
+        }
+      fi
+
+      # Idempotent: already mounted (e.g. a re-run) means nothing to do.
+      if mountpoint -q "$MOUNT_POINT"; then
+        log "$MOUNT_POINT already mounted; nothing to do."
+        exit 0
+      fi
+
+      install -d -m 0770 -o drupal -g drupal "$MOUNT_POINT"
+
+      umask 077
+      mkdir -p "$CRED_DIR"
+      cat > "$CRED_FILE" <<CREDEOF
+      username=$STORAGE_ACCOUNT
+      password=$PRIVATE_STORAGE_KEY
+      CREDEOF
+      chmod 600 "$CRED_FILE"
+
+      DRUPAL_UID=$(id -u drupal)
+      DRUPAL_GID=$(id -g drupal)
+
+      # Persist in fstab so the mount also survives an in-place reboot (host
+      # maintenance), not just reimages where cloud-init re-runs. _netdev + nofail
+      # keep boot from hanging/failing if the share is briefly unreachable.
+      # SELinux is enforcing and CIFS takes a single mount-wide label, so force the
+      # same context Apache/php-fpm use for the web root (httpd_sys_rw_content_t) --
+      # otherwise php-fpm cannot read/write the mounted private files.
+      MOUNT_OPTS="credentials=$CRED_FILE,vers=3.1.1,uid=$DRUPAL_UID,gid=$DRUPAL_GID,dir_mode=0770,file_mode=0660,serverino,nosharesock,actimeo=30,mfsymlinks,_netdev,nofail,context=system_u:object_r:httpd_sys_rw_content_t:s0"
+      FSTAB_LINE="//$STORAGE_ACCOUNT.file.core.windows.net/$SHARE_NAME $MOUNT_POINT cifs $MOUNT_OPTS 0 0"
+      if ! grep -qF " $MOUNT_POINT cifs " /etc/fstab 2>/dev/null; then
+        echo "$FSTAB_LINE" >> /etc/fstab
+      fi
+
+      if mount "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE"; then
+        log "Mounted //$STORAGE_ACCOUNT.file.core.windows.net/$SHARE_NAME at $MOUNT_POINT"
+      else
+        log "ERROR: failed to mount private files share; continuing with ephemeral local dir."
+        exit 0
+      fi
 
 %{ if enable_https && domain_name != null ~}
   # TLS setup script (Let's Encrypt with blob-backed cert persistence)
@@ -578,6 +667,10 @@ runcmd:
 
   # Fetch secrets from Key Vault (must run before drupal-init.sh)
   - /opt/fetch-secrets.sh
+
+  # Mount Azure Files share for durable private:// storage
+  # (needs PRIVATE_STORAGE_KEY from fetch-secrets.sh above)
+  - /opt/mount-private-files.sh
 
   # Run Drupal initialization
   - /opt/drupal-init.sh

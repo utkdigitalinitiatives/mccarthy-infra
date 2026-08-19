@@ -8,7 +8,7 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — nothing blocking as of 2026-08-18
+## Work in flight — nothing blocking as of 2026-08-19
 
 **The 11.4.5 security update is deployed to production and verified on the box.**
 The GitHub outage that paused this on 2026-08-17 cleared; every step in the old
@@ -22,6 +22,7 @@ resume list is done. What is left are two cleanups, neither urgent.
 | `deploy-on-main-merge.yml` run `32137792054` | green, 7m11s, dev VM cleaned up |
 | Production | image **`0.0.7`**, Drupal **11.4.5** |
 | SA-CORE-2026-010 / -011 / -012 | cleared |
+| `feat/private-files-share` | **applied and verified on production 2026-08-19** — see Resolved |
 
 Both merges again needed `gh pr merge --admin`. `dev-review` has no bypass actor,
 and the `dev-to-main` bypass actor still does not satisfy an API merge — the same
@@ -265,17 +266,29 @@ a resource with the ID ".../DefenderForStorageSettings/current" already exists -
 to be managed via Terraform this resource needs to be imported into the State.
 ```
 
-**Production is NOT affected** — verified by plan on 2026-08-03, which creates 33
-resources and no `defender_for_storage` among them. The resource is `count`-gated
-on `disable_defender_for_storage`, which defaults to `false` and is set to `true`
-only in `environments/devtest/main.tf:117`. `dev` does not set it either.
+This was **not** a production concern as of the 2026-08-03 plan, which created 33
+resources and no `defender_for_storage` among them. The module's resource is
+`count`-gated on `disable_defender_for_storage`, which defaults to `false` and is
+set to `true` only in `environments/devtest/main.tf:117`. `dev` does not set it
+either.
+
+**⚠️ It IS a production concern now (2026-08-18).** The private-files port added
+a *second* opt-out, `azapi_resource.private_files_defender_off` in
+`environments/production/main.tf` — declared directly in the environment, not
+through the module. Its first apply will hit exactly this error. See the
+private-files section under Open for the ordering.
 
 So this recurs on any storage account that *opts out* of Defender, not on every
 new one. Unblock with:
 
 ```bash
+# via the module (devtest)
 terraform import 'module.blob_storage.azapi_resource.defender_for_storage[0]' \
   '<storage-account-id>/providers/Microsoft.Security/DefenderForStorageSettings/current?api-version=2022-12-01-preview'
+
+# declared in the environment (production private files)
+terraform import 'azapi_resource.private_files_defender_off' \
+  '<private-files-storage-account-id>/providers/Microsoft.Security/DefenderForStorageSettings/current?api-version=2022-12-01-preview'
 ```
 
 Proper fix: switch the module to `azapi_update_resource`, which patches an
@@ -887,6 +900,93 @@ lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 ---
 
 ## Resolved
+
+### Durable `private://` storage via Azure Files — applied and verified 2026-08-19
+
+**Status: mounted, labelled and serving on production.** Written 2026-08-18,
+applied 2026-08-19. Webform uploads now survive a reimage. Both of the blockers
+this entry carried turned out to be real; neither cost a retry, because the
+apply was split to disarm them first.
+
+**Why.** mccarthy already had half of this. The base image bakes
+`$settings['file_private_path'] = '../private'` and creates the directory
+(`packer/ansible/playbook.yml:91` and `:140`), so `private://` works — but it
+pointed at a per-instance local directory. Every deploy reimages the VMSS, so
+anything a webform saved there was **destroyed on the next deploy**. It was
+skipped at porting time because lib-main's version was then unapplied WIP; lib-main
+merged it (`c844159`, `56a1277`) and verified it live on production 2026-08-05,
+so that reason expired.
+
+**What it added:**
+
+| Where | What |
+|---|---|
+| `environments/production/main.tf` | `random_string.private_files_suffix`, `azurerm_storage_account.private_files` (`mccprivprod<8>`, Standard LRS, StorageV2, 7-day share soft delete, shared-key **on**), `azurerm_storage_share.drupal_private` (100 GiB, TransactionOptimized), `azapi_resource.private_files_defender_off`, `azurerm_key_vault_secret.private_files_storage_key` (`production-private-files-storage-key`) |
+| `environments/production/main.tf` | `azapi` added to `required_providers` — it was already an implicit dependency via `modules/blob-storage`, so the lock file did not change |
+| `environments/production/cloud-init.tftpl` | `fetch-secrets.sh` also fetches the private key **best-effort** and writes it to `secrets.env`; new `/opt/mount-private-files.sh`; `runcmd` runs it between `fetch-secrets.sh` and `drupal-init.sh` |
+
+**Design points carried over deliberately, do not "simplify" them away:**
+
+- **Dedicated storage account, not `module.blob_storage`.** SMB needs
+  shared-key auth, so putting the share on the media account would permanently
+  pin shared-key there and block its planned move to MI-only auth. It also keeps
+  the public-serving account's key/SAS surfaces away from private data.
+- **The mount is non-fatal.** The private key is fetched best-effort and is
+  **not** in the required-secrets gate. Any failure logs `ERROR` to
+  `/var/log/drupal-init.log` and the site boots on the empty local directory.
+- **`context=system_u:object_r:httpd_sys_rw_content_t:s0` is mandatory.**
+  SELinux is enforcing and CIFS takes one mount-wide label; without it php-fpm
+  cannot read or write the share.
+- **`_netdev,nofail` in fstab** so the mount survives an in-place reboot without
+  being able to hang boot.
+- **Production only.** dev is destroyed and recreated on every promotion and its
+  database is re-synced from production, so durable private files there would
+  only accumulate orphans. Do not re-file this as a gap.
+
+**How it was applied — three steps, deliberately not one.** A single
+`terraform apply` would have created the storage account and then died on the
+Defender singleton mid-run, leaving a half-applied production. Instead:
+
+1. `terraform apply -target=azurerm_storage_account.private_files` — the account
+   alone. Produced `mccprivprodwh2chev5`.
+2. `terraform import 'azapi_resource.private_files_defender_off' '<account-id>/providers/Microsoft.Security/DefenderForStorageSettings/current?api-version=2022-12-01-preview'`
+3. Full apply. 2 to add (share, KV secret), 5 to change. The only meaningful
+   change was the VMSS `custom_data`; the other four were provider
+   state-normalisation no-ops.
+
+Every command carried `-var="image_version=0.0.7"`. See the stale-tfvars entry
+below — that pin was load-bearing, not ceremony.
+
+**The Defender import was necessary, as predicted.** Azure had already created
+`DefenderForStorageSettings/current` by the time the account finished
+provisioning. After the import the plan showed only
+`overrideSubscriptionLevelSettings: false -> true`, i.e. `isEnabled` was already
+`false` and the import merely took ownership. This is the third environment to
+hit this trap; the proper fix (`azapi_update_resource`) is still open above.
+
+**`cifs-utils` was confirmed without touching the instance.** The gallery image
+version carries its provenance as a tag: `mccarthy-rocky-linux-9` `0.0.7` is
+tagged `BaseImageVer: 2026.08.1`, which is exactly the base lib-main baked
+`cifs-utils` into. So the boot-time `dnf` guard install — the path that failed on
+lib-main on 2026-08-04 — never ran. **Prefer the image tags to a run-command for
+this class of question; they answer it without waking the box.**
+
+**Verified after the roll, not inferred from the apply exit code:**
+
+| Check | Result |
+|---|---|
+| Rolling upgrade | `Completed`, 0 failed; instance `_4` -> `_5` at 12:15:12Z |
+| Instance image | `0.0.7`, `latestModelApplied: true` |
+| `mountpoint /var/www/drupal/private` | is a mountpoint |
+| CIFS options | `vers=3.1.1`, `context=system_u:object_r:httpd_sys_rw_content_t:s0`, `uid=993 gid=992 dir_mode=0770 file_mode=0660` |
+| `/var/log/drupal-init.log` | `[mount-private] Mounted ... at /var/www/drupal/private`, 12:16:01Z, first try |
+| Share `drupal-private` | exists, 100 GiB, TransactionOptimized |
+| KV `production-private-files-storage-key` | created 12:15:06Z, enabled |
+| Site | HTTPS 200 on `/user/login` rendering `user_login_form`; HTTP 301 |
+
+`shareUsageBytes` reads 0 and that is **not** evidence either way — nothing has
+uploaded a webform file yet, and the metric lags. The mount options are the
+proof; the byte count is not.
 
 ### Devs had no way to pull a production DB dump — built, applied and proven 2026-08-18
 

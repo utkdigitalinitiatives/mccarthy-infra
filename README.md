@@ -263,9 +263,13 @@ backlog. Deliberate divergences:
 | Base image | built here, monthly | consumed from the shared gallery |
 | Operational docs | hidden via `.git/info/exclude` | committed |
 
-Not carried over: the unmerged `private://` Azure Files share. It was
-uncommitted work-in-progress in lib-main-infra that has never been applied, so
-it is not a proven pattern to copy.
+Carried over later: the `private://` Azure Files share. At the original
+comparison it was uncommitted work-in-progress in lib-main-infra and had never
+been applied, so it was deliberately skipped. lib-main merged and verified it on
+production on 2026-08-05, and it was ported here on 2026-08-18 — a dedicated
+storage account plus a `drupal-private` share, mounted over
+`/var/www/drupal/private` at boot. Production only; see
+[docs/TODO.md](docs/TODO.md).
 
 ## Local Terraform
 

@@ -8,6 +8,11 @@ lessons from operating lib-main that drove mccarthy's divergences.
 against mccarthy-infra `8c49356`. lib-main-infra's uncommitted `private://`
 Azure Files WIP is excluded — it has never been applied.
 
+> **Update (2026-08-18):** that exclusion is stale. lib-main merged the
+> `private://` Azure Files share (`c844159`, `56a1277`) and verified it live on
+> production on 2026-08-05, and it has now been ported to mccarthy production.
+> Nothing else in this comparison has been re-based.
+
 ## What didn't change
 
 The architecture is the same design, deliberately: Load Balancer → VMSS
