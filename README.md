@@ -2,8 +2,17 @@
 
 Infrastructure as Code for the `mccarthy` Drupal site.
 
-**Status: scaffolding.** No Azure resources have been created and no pipeline has
-run. See [docs/bootstrap-runbook.md](docs/bootstrap-runbook.md) to stand it up.
+**Status: live.** Production serves `https://libtest1.lib.utk.edu`. The running
+image version is deliberately not named here — it changes on every promotion and
+a number in this file goes stale silently. Read it from the scale set instead:
+
+```
+az vmss show -g mccarthy-production-rg -n mccarthy-production-vmss \
+  --query "virtualMachineProfile.storageProfile.imageReference.id" -o tsv
+```
+
+See [docs/bootstrap-runbook.md](docs/bootstrap-runbook.md) for how it was stood
+up and [docs/TODO.md](docs/TODO.md) for what is open.
 
 ## The two-repo split
 
@@ -143,8 +152,9 @@ mccarthy-infra/
 │   └── dev/                       # ephemeral dev VM               (apply 3rd; CI only)
 ├── bootstrap/azure-setup.sh       # one-time Azure setup, idempotent
 └── docs/
-    ├── bootstrap-runbook.md   # stand it up from nothing
-    └── TODO.md                # known issues and deferred work
+    ├── bootstrap-runbook.md       # stand it up from nothing
+    ├── lib-main-infra-comparison.md
+    └── TODO.md                    # known issues and deferred work
 ```
 
 **Apply order is load-bearing:** `secrets` → `devtest` → `production` / `dev`.

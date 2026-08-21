@@ -8,11 +8,33 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — nothing blocking as of 2026-08-19
+## Work in flight — nothing blocking, three doc files uncommitted, as of 2026-08-21
 
-**The 11.4.5 security update is deployed to production and verified on the box.**
-The GitHub outage that paused this on 2026-08-17 cleared; every step in the old
-resume list is done. What is left are two cleanups, neither urgent.
+**2026-08-21: `docs/developer-onboarding.md` is permanently untracked. This is a
+decision, not a hold.** It was gitignored on 2026-08-19 pending a developer
+walkthrough, and both the `.gitignore` comment and item 6 under "Open" told a
+future reader to publish it afterwards. That instruction is now wrong and has
+been rewritten in both places: **the lead developer will write their own
+onboarding document**, and this file stays a local operator reference forever.
+The two README pointers removed on 2026-08-19 stay removed — the tracked
+`README.md` docs tree already omits it. Verified the same day with
+`git log --all -- docs/developer-onboarding.md`: **the file has never been
+committed on any branch**, so there is nothing in history to purge, and
+`git check-ignore -v` still resolves it to the `.gitignore` line. Note this does
+**not** close item 6's real point — no part of the developer-side path has been
+executed yet. Only the publish-the-doc instruction is retired.
+
+**2026-08-19: durable `private://` storage is live on production, and the stale
+`image_version` footgun that applying it exposed is fixed.** Both are merged to
+`main` and pushed (`e2a8b6d`, `8d0446d`, `b9b5ffd`), `feat/private-files-share`
+is deleted, and the working tree is clean. **Nothing is half-applied** — a plan
+at `-var="image_version=0.0.7"` reports `No changes.` Write-ups are the top two
+entries under `## Resolved`.
+
+**2026-08-18: the 11.4.5 security update is deployed to production and verified
+on the box.** The GitHub outage that paused this on 2026-08-17 cleared; every
+step in that resume list is done. What is left are the same two cleanups,
+neither urgent.
 
 | What | State |
 |---|---|
@@ -22,7 +44,9 @@ resume list is done. What is left are two cleanups, neither urgent.
 | `deploy-on-main-merge.yml` run `32137792054` | green, 7m11s, dev VM cleaned up |
 | Production | image **`0.0.7`**, Drupal **11.4.5** |
 | SA-CORE-2026-010 / -011 / -012 | cleared |
-| `feat/private-files-share` | **applied and verified on production 2026-08-19** — see Resolved |
+| `feat/private-files-share` | **applied, verified, merged to `main`, branch deleted** 2026-08-19 — see Resolved |
+| Production `image_version` guard | shipped 2026-08-19 (`8d0446d`, `b9b5ffd`) — mandatory + staleness check, see Resolved |
+| Working tree / `origin/main` | `origin/main` in sync at `b9b5ffd`; **3 tracked files modified and staged, not committed** — `.gitignore`, `README.md`, `docs/TODO.md` |
 
 Both merges again needed `gh pr merge --admin`. `dev-review` has no bypass actor,
 and the `dev-to-main` bypass actor still does not satisfy an API merge — the same
@@ -53,6 +77,140 @@ consecutive reimage.
    and four devs hold container-scoped read on it. See the Resolved entry. The
    only untested link is a dev running `ddev import-db` on their own machine,
    which is on their side of the boundary.
+4. ~~**Local dev tooling for `mccarthy-index` is written but not merged.**~~ —
+   **merged 2026-08-19 and 2026-08-20.** PR #9 took all five files to `main`
+   (merge `892e95f`): `.ddev/commands/host/refresh-local`,
+   `.ddev/commands/host/pull-assets`, a first-ever `.gitignore`,
+   `web/sites/default/settings.local.php.example`, and a one-block edit to
+   `settings.php` enabling the `settings.local.php` include. PR #10 followed on
+   2026-08-20 with a two-line comment clarification in `refresh-local`
+   (`4f46ee5`). Both merges needed `gh pr merge --admin`, because `dev-to-main`
+   rejects any head branch that is not `dev` — the same behaviour as PRs #5, #6,
+   #7 and #8. **Still nothing has been run** — see item 6, which is unchanged by
+   the merge.
+5. **The `.gitignore` gap that prompted it.** `mccarthy-index` had **no
+   `.gitignore` at all** — found 2026-08-19. With `web/core`, `vendor/` and all
+   contrib untracked and nothing ignoring them, `git status` in a working DDEV
+   checkout is thousands of lines of noise, and a production dump in the project
+   root was one `git add .` from being permanent in a **public** repo. The dump
+   that was sitting there has since been deleted by hand. The new `.gitignore`
+   covers the Composer-managed paths, `sites/*/files`, `settings.local.php`, and
+   `*.sql` / `*.sql.gz` / `*.dump`.
+6. **None of the developer-side path has ever been executed.**
+   `docs/developer-onboarding.md` and the five files on `feat/local-dev-tooling`
+   were written against verified facts, but `ddev start`,
+   `ddev composer install`, `ddev refresh-local` and `ddev pull-assets` have not
+   been run by anyone, here or on a developer's machine. Treat the first
+   developer through it as the test and fold what breaks back in.
+
+   **The doc itself is gitignored on purpose and exists only on the operator's
+   machine**, added to `.gitignore` on 2026-08-19. It is not missing and it was
+   not lost. This repository otherwise commits its operational docs deliberately,
+   unlike `lib-main-infra`, so this is a standing exception with one reason: an
+   unrun runbook in a public repository invites people to follow it. **Decided
+   2026-08-21: this file will never be committed.** It is not waiting on a
+   developer walkthrough. The lead developer will write their own onboarding
+   document, and this one stays a local operator reference. The two README
+   pointers removed on 2026-08-19 (the top-of-file "Developers start at" line and
+   the `docs/` tree entry) stay removed.
+
+7. **`dispatch-main-merge.yml` in `mccarthy-index` has no `paths-ignore`**, so a
+   change that cannot affect the running site still reimages production. Proven
+   by PR #10 on 2026-08-20, which was two lines of comment. See the Open entry
+   "A comment-only change to the app repo redeploys production" for the run IDs,
+   and for why copying the dev workflow's `**.md` ignore would not have caught
+   it.
+
+**2026-08-19: the developer onboarding path is written down.**
+`docs/developer-onboarding.md` is new and covers what was previously only in a
+workflow summary and in people's heads: prerequisites, `ddev start`, pulling and
+sanitizing the production dump, the media story, the `config/` and site-UUID
+rules, and how a change travels topic → `dev` → `main` → production.
+
+The doc went through two rounds. The first draft got the media section **wrong**
+— it implied that downloading blobs into `web/sites/default/files` would make
+`azblob://` URIs resolve, which it cannot. The second draft corrected that but
+then over-corrected, recommending Azurite and warning developers off the
+URI-rewrite approach that lib-main already ships. What survives is the third
+position, worked out by reading lib-main's actual `refresh-local` command:
+mirror it, minus its SAS token. That decision and its evidence are the section
+below; the tooling itself is item 4.
+
+**It still claims nothing about having been run** — the `drupal-media` container
+in devtest holds **zero blobs**, checked against Azure that day, and the site has
+no file fields at all. The README's `Status: scaffolding. No Azure resources have
+been created` line was corrected in the same pass — it had been wrong since
+2026-08-03 and was the first thing a new developer would read.
+
+### Local media in DDEV — decided 2026-08-19, mirroring lib-main
+
+**The problem.** `az_blob_fs` is enabled in `config/core.extension.yml`, so `cim`
+registers the `azblob://` stream wrapper on every developer machine, while
+`config/az_blob_fs.settings.yml` exports account name, container and key name all
+empty. **The scheme in the URI routes the request, not the file's location** — so
+copying blobs into `web/sites/default/files` leaves the bytes present and Drupal
+unable to see them. It fails soft: `getAzBlobProxyClient()` returns `NULL` when
+the key name is empty, so the site boots and the images break. Handing out the
+storage **account key** is the one fix that must not happen; developers hold
+container-scoped RBAC on purpose.
+
+**Two options were weighed, and the first draft of the onboarding doc recommended
+the wrong one.** It said to build Azurite — which `az_blob_fs` does support
+natively via `az_blob_local_emulator` / `127.0.0.1` / `10000`
+(`AzBlobFsService.php:127-136`), with a well-known public account key, keeping
+`azblob://` URIs identical to production — and it told developers *not* to rewrite
+URIs to `public://`. **That advice ignored the sibling project.** lib-main has
+shipped the rewrite approach for a while, in
+`.ddev/commands/host/refresh-local`, and the same developers work in both repos.
+Matching a workflow they already know beats a technically purer one they do not.
+
+**Chosen: lib-main's shape, minus the SAS.** Three deliberate improvements over
+the thing being copied, each of which is a defect in lib-main worth not
+inheriting:
+
+- **No shared secret.** lib-main distributes a container SAS URL by hand into a
+  gitignored `.ddev/.env.assets` and syncs with `azcopy`. Here
+  `pull-assets` runs `az storage blob download-batch --auth-mode login`, so each
+  developer authenticates as themselves through the container-scoped
+  `Storage Blob Data Reader` grant they already hold. Nothing to distribute, and
+  removing a person actually removes them.
+- **Sanitizing is automatic.** lib-main never runs `sql:sanitize` — its
+  `refresh-local` imports the production user table and leaves it there, and its
+  onboarding guide does not mention sanitizing at all. Here it runs by default,
+  with `--no-sanitize` to opt out. Both projects are public repositories holding
+  real `users.pass` hashes and staff email addresses.
+
+**A correction, because it was written here wrongly first.** This list originally
+claimed a third improvement: that lib-main runs `config:import` *after* setting
+the file scheme, "which puts `uri_scheme: azblob` back — its own diagnostic warns
+about the mess it just made." **That is wrong**, and the reordering does not fix
+anything. Verified against lib-main's own config on 2026-08-19:
+`config/system.file.yml` exports `default_scheme: public`, so its
+`drush cset system.file default_scheme public` is a no-op that `config:import`
+cannot meaningfully revert; and the five `field.storage.*` objects plus two
+`editor.editor.*` objects are committed as `azblob`, which the script never
+touches at any point. **The diagnostic warns about committed config, not about
+ordering.** Nothing but a `settings.local.php` override can silence it — which is
+exactly what lib-main's warning text says. Running `config:import` first here is
+a small robustness gain (it would still hold if committed `default_scheme` ever
+stopped being `public`) and nothing more. Do not repeat the stronger claim.
+- **The override file is committed.** lib-main keeps its `settings.local.php`
+  values out of the repo and points developers at SharePoint. Those values are
+  scheme names, not secrets. `settings.local.php.example` is committed here, and
+  `settings.local.php` itself stays gitignored — and because they are runtime
+  `$config` overrides, `drush cex` cannot carry them back into the repository.
+
+**The upload diagnostic is enumerated, not hardcoded.** lib-main checks a fixed
+list of eight config objects, which silently stops covering anything added after
+the list was written. This one walks `field.storage.*` for `settings.uri_scheme`
+and `editor.editor.*` for `image_upload.scheme`. It passes trivially today —
+the site has **no file fields at all**, confirmed by grepping `config/` — and
+starts warning the day the first one lands.
+
+**Azurite is not rejected, only deferred.** It remains the higher-fidelity
+answer, because it is the only option where a *new local upload* through an
+`azblob` field works the way it will in production. Revisit it if the URI-rewrite
+approach starts costing real debugging time.
 
 **Handoff to the devs, decided 2026-08-18.** The infra side is considered ready
 for the devs to start building the site out. The boundary that settled it: **if a
@@ -862,6 +1020,39 @@ database updates required, so the bump carried no schema work.
 **The standing lesson, which does not expire:** Dependabot will not tell you
 about the next core advisory either. `composer audit --locked` is the only thing
 that will. Run it on a schedule, not on a hunch.
+
+---
+
+### A comment-only change to the app repo redeploys production
+
+**Observed 2026-08-20.** `mccarthy-index` PR #10 changed nothing but a comment —
+two lines of the header block in `.ddev/commands/host/refresh-local`, no code and
+no config. Merging it to `main` still ran a full production deploy.
+
+The chain: PR #10 merged 12:48:48Z → `dispatch-main-merge.yml` run `32370814745`
+(green, 12s) → this repo's `deploy-on-main-merge.yml` run `32370830254` (green,
+1m33s, all three jobs — Get Image Version, Deploy to Production, Cleanup Dev VM).
+Production reimaged for a comment.
+
+**Cause.** `mccarthy-index/.github/workflows/dispatch-main-merge.yml` fires on
+`push: branches: [main]` with no `paths-ignore` at all. Its sibling
+`dispatch-dev-merge.yml` already carries one, with a comment explaining exactly
+why: "A docs or workflow edit should not spend ~20 minutes rebuilding an image
+and recycling the dev VM." The same reasoning was never applied to the main path.
+
+**The obvious fix is not enough.** `dispatch-dev-merge.yml` ignores `**.md`.
+Copying that verbatim would not have stopped this deploy — the change was to
+`.ddev/commands/host/refresh-local`, which is not a `.md` file. Any fix has to
+ignore `.ddev/**` as well. That directory is local developer tooling; it is not
+consumed by the Packer build and cannot affect the running site.
+
+**Not fixed here** because it edits the trigger on the production deploy path,
+which deserves its own branch and its own verification rather than a drive-by. A
+wrong `paths-ignore` fails silent and in the dangerous direction: a real change
+merges to `main` and never deploys, and nothing reports red.
+
+Note that the deploy itself was correct and green. Nothing is broken; the cost is
+a needless reimage of production and the risk that it becomes routine.
 
 ---
 

@@ -39,3 +39,12 @@ packer_cache/
 
 # Logs
 *.log
+
+# Permanently untracked, by decision on 2026-08-21. Not a hold, not a TODO.
+# This repository commits its operational docs deliberately; this file is the
+# standing exception. Its developer-side half (ddev start, ddev refresh-local,
+# ddev pull-assets) has never been executed by anyone, and an unrun runbook in a
+# public repo invites people to follow it. The lead developer will write their
+# own onboarding document. This file stays a local operator reference only.
+# Do not remove this line and do not commit the file.
+docs/developer-onboarding.md
