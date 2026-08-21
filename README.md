@@ -66,6 +66,15 @@ If `lib-main-infra` ever tears down its images resource group, this project's
 builds break. That coupling is the price of not duplicating a 27-minute monthly
 build.
 
+3. **Housekeeping.** Nothing pruned that gallery until 2026-08-21. This repo now
+   deletes its own intermediate managed image after each build and sweeps stray
+   `pkr*` build resources before it, via `.github/scripts/packer-cleanup.sh`; the
+   shared gallery prune runs monthly from lib-main-infra and discovers image
+   definitions at run time, so this project is covered without an edit there. A
+   cancelled build leaks a **running** VM, which is the expensive part — see
+   [`docs/lib-main-infra-comparison.md`](docs/lib-main-infra-comparison.md) →
+   "Image lifecycle: pitfalls found 2026-08-21" before setting up another site.
+
 ## VNet address allocation
 
 Every library Drupal site is a **spoke**; the hub is the Asimov AKS cluster,
