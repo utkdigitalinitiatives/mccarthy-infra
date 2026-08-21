@@ -8,7 +8,7 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — nothing blocking, three doc files uncommitted, as of 2026-08-21
+## Work in flight — nothing blocking, production on `0.0.8`, as of 2026-08-21
 
 **2026-08-21: `docs/developer-onboarding.md` is permanently untracked. This is a
 decision, not a hold.** It was gitignored on 2026-08-19 pending a developer
@@ -23,6 +23,44 @@ committed on any branch**, so there is nothing in history to purge, and
 `git check-ignore -v` still resolves it to the `.gitignore` line. Note this does
 **not** close item 6's real point — no part of the developer-side path has been
 executed yet. Only the publish-the-doc instruction is retired.
+
+**2026-08-21: production moved to image `0.0.8`, and the day is worth reading in
+order because the two halves look unrelated and are not.**
+
+- `17:00Z` — `mccarthy-index` `dev` took `ed8bd2d` "Record import feed". That
+  dispatched `build-on-dispatch.yml` run `32505935997`, which built image
+  `0.0.8` and deployed it to the dev VM. **The run reported red.** Every job did
+  its real work and every assertion passed; the only failure was the cloud-init
+  `warning` gate, matching one benign openssl line. Verified by hand against
+  `52.167.2.0`: HTTPS `/health` 200, HTTPS `/user/login` 200. That gate is now
+  fixed — see the Resolved entry.
+- `19:11Z` — `mccarthy-index` `main` took `b886b72` "import setup", which
+  dispatched `deploy-on-main-merge.yml` run `32517237768`. It went green in
+  6m27s and production now runs `0.0.8`.
+
+**The thing to notice: the red dev run did not stop the promotion.** `0.0.8` was
+promoted to production about two hours after its dev gate reported failure,
+because the promotion path reads the newest image out of the gallery and has no
+opinion about how the dev run that built it exited. In this instance that was
+harmless — the image was good and the gate was wrong. The general case is not
+harmless, and it is the same cry-wolf cost written up in the Resolved entry,
+arriving from the other direction.
+
+**Also worth noting: `deploy-on-main-merge.yml` promotes an image, not a commit.**
+Production is running `0.0.8`, which was built from `ed8bd2d`. It was **not**
+built from `b886b72`, the commit whose merge triggered the promotion. Whatever
+`b886b72` changed in the app repo is not in the running image unless it was
+already in `ed8bd2d`. This is how the pipeline is designed, but the run's title
+names the wrong SHA for what is actually deployed.
+
+**Verified after the deploy, since a green run is not proof here.** The scale set
+reports a single instance on `0.0.8` with `latestModelApplied: true` and
+`provisioningState: Succeeded`; the `0.0.7` instance is gone. Live checks:
+`https://libtest1.lib.utk.edu/user/login` returned 200 on five separate requests,
+three of them taken *during* the rolling upgrade, and HTTP 301'd to HTTPS. Drupal
+version on the box was **not** re-confirmed — the previous entry's 11.4.5 was
+carried forward on the assumption that `ed8bd2d` did not touch core, which is
+unverified.
 
 **2026-08-19: durable `private://` storage is live on production, and the stale
 `image_version` footgun that applying it exposed is fixed.** Both are merged to
@@ -42,11 +80,15 @@ neither urgent.
 | `mccarthy-index` PR #8, `dev` → `main` | merged 2026-08-18 12:37Z |
 | `build-on-dispatch.yml` run `32135176539` | all four jobs did their real work; reports red, see below |
 | `deploy-on-main-merge.yml` run `32137792054` | green, 7m11s, dev VM cleaned up |
-| Production | image **`0.0.7`**, Drupal **11.4.5** |
+| Production | image **`0.0.8`** as of 2026-08-21 19:19Z — see the entry below |
 | SA-CORE-2026-010 / -011 / -012 | cleared |
 | `feat/private-files-share` | **applied, verified, merged to `main`, branch deleted** 2026-08-19 — see Resolved |
 | Production `image_version` guard | shipped 2026-08-19 (`8d0446d`, `b9b5ffd`) — mandatory + staleness check, see Resolved |
-| Working tree / `origin/main` | `origin/main` in sync at `b9b5ffd`; **3 tracked files modified and staged, not committed** — `.gitignore`, `README.md`, `docs/TODO.md` |
+| `build-on-dispatch.yml` run `32505935997` | dev deploy of `0.0.8` / `ed8bd2d` — **succeeded**, reported red on the `warning` gate alone; site verified by hand at `52.167.2.0` |
+| The cloud-init `warning` gate | **fixed 2026-08-21** in `build-on-dispatch.yml` — errors fail, warnings only print. Never yet run in CI. |
+| `deploy-on-main-merge.yml` run `32517237768` | **green**, 2026-08-21 19:12-19:19Z — promoted `0.0.8` to production, dev VM cleaned up |
+| `mccarthy-infra` PR #1, `docs/image-cleanup-lessons` → `main` | merged `218389f` 2026-08-21 — Packer leak sweep + intermediate image delete |
+| Working tree / `origin/main` | clean, pushed. Two commits 2026-08-21 — the docs backlog, then the gate fix — **rebased onto `218389f`**, which had landed on `main` while they were being written. No conflicts: PR #1 edits the `build-image` job and README section 3; these edit the `deploy-dev` job and the README header. |
 
 Both merges again needed `gh pr merge --admin`. `dev-review` has no bypass actor,
 and the `dev-to-main` bypass actor still does not satisfy an API merge — the same
@@ -68,8 +110,10 @@ consecutive reimage.
 
 **Left to do:**
 
-1. **The cloud-init log gate fails on the word `warning`** — see its Open entry
-   below. It red-X'd an otherwise correct dev deploy on 2026-08-18.
+1. ~~**The cloud-init log gate fails on the word `warning`**~~ — **fixed
+   2026-08-21** after it red-X'd a second correct dev deploy (run
+   `32505935997`). Warnings are now printed without failing the job. See the
+   Resolved entry. Production still has no cloud-init gate at all.
 2. **The standing bypass actor on `dev-to-main`** (user `26966411`,
    `bypass_mode: "always"`) should be removed. Untouched since 2026-08-11.
 3. ~~**Build the dev DB-dump path**~~ — **done 2026-08-18.**
@@ -252,55 +296,6 @@ destroys them, with nothing logged.
 ---
 
 ## Open
-
-### The cloud-init log gate fails on the word `warning`, so a correct deploy reports red
-
-**Found 2026-08-18 on run `32135176539` of `build-on-dispatch.yml`, the run that
-deployed 11.4.5 to dev. This is not a deploy defect — the site was right. The
-gate is the defect.**
-
-`build-on-dispatch.yml:526` surfaces the cloud-init log with
-
-```
-grep -iE '(error|fatal|fail|warning)' /var/log/cloud-init-output.log
-```
-
-and fails the job whenever grep matches. `warning` sits in that alternation, so
-any benign warning anywhere in a boot fails the deploy. On this run it matched
-exactly two lines, both harmless:
-
-- `req warning: No value provided for subject name attribute "O", skipped` —
-  openssl declining to fill an empty subject field while it generates the
-  placeholder self-signed certificate. Expected on every boot.
-- `[warning] Schema information for module az_blob_fs was missing from the
-  database.` — drush narrating its own work partway through `en az_blob_fs`.
-  **Checked afterwards on the VM: the `system.schema` row for `az_blob_fs` is
-  present and `updatedb:status` reports no updates required.** The warning
-  describes a state that existed mid-command and did not exist when the command
-  finished.
-
-Everything the run actually asserts about the site passed, including the new
-Drupal gate on its first ever execution. Verified independently against the dev
-VM: HTTPS `/health` 200, HTTPS `/user/login` 200 rendering `user_login_form`,
-title `Log in | Cormac Index`, HTTP 301 to HTTPS, and both `composer.lock` and
-`drush status` reporting 11.4.5.
-
-**Why this matters more than it looks.** The standing rule in this repo is that a
-green run is not proof — see "A note on first runs". The mirror image costs just
-as much: a red run that is not a failure trains you to skim past red. That is the
-exact habit that let the 2026-08-11 TLS outage sit behind a green check for 25
-minutes. A gate that cries wolf on every boot is worse than no gate, because it
-spends the attention that a real gate needs.
-
-**The fix** is to drop `warning` from the alternation, leaving
-`(error|fatal|fail)`, and — if warnings are still wanted for diagnosis — write
-them to the step summary without failing the job. Not done. The deploy was let
-through as it stood because the site had been verified by hand.
-
-**This gate exists only in `build-on-dispatch.yml`.** `deploy-on-main-merge.yml`
-has no equivalent step, which is why the production promotion later the same day
-reported green. Do not assume a fix here covers production; production has no
-cloud-init log gate at all, which is its own gap.
 
 ### `config:import` cannot install az_blob_fs — the first deploy of the blob wiring broke dev while its health check passed
 
@@ -1091,6 +1086,78 @@ lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 ---
 
 ## Resolved
+
+### The cloud-init log gate failed on the word `warning`, so a correct deploy reported red — fixed 2026-08-21
+
+**Found 2026-08-18 on run `32135176539` of `build-on-dispatch.yml`, the run that
+deployed 11.4.5 to dev. This is not a deploy defect — the site was right. The
+gate is the defect.**
+
+`build-on-dispatch.yml:526` surfaces the cloud-init log with
+
+```
+grep -iE '(error|fatal|fail|warning)' /var/log/cloud-init-output.log
+```
+
+and fails the job whenever grep matches. `warning` sits in that alternation, so
+any benign warning anywhere in a boot fails the deploy. On this run it matched
+exactly two lines, both harmless:
+
+- `req warning: No value provided for subject name attribute "O", skipped` —
+  openssl declining to fill an empty subject field while it generates the
+  placeholder self-signed certificate. Expected on every boot.
+- `[warning] Schema information for module az_blob_fs was missing from the
+  database.` — drush narrating its own work partway through `en az_blob_fs`.
+  **Checked afterwards on the VM: the `system.schema` row for `az_blob_fs` is
+  present and `updatedb:status` reports no updates required.** The warning
+  describes a state that existed mid-command and did not exist when the command
+  finished.
+
+Everything the run actually asserts about the site passed, including the new
+Drupal gate on its first ever execution. Verified independently against the dev
+VM: HTTPS `/health` 200, HTTPS `/user/login` 200 rendering `user_login_form`,
+title `Log in | Cormac Index`, HTTP 301 to HTTPS, and both `composer.lock` and
+`drush status` reporting 11.4.5.
+
+**Why this matters more than it looks.** The standing rule in this repo is that a
+green run is not proof — see "A note on first runs". The mirror image costs just
+as much: a red run that is not a failure trains you to skim past red. That is the
+exact habit that let the 2026-08-11 TLS outage sit behind a green check for 25
+minutes. A gate that cries wolf on every boot is worse than no gate, because it
+spends the attention that a real gate needs.
+
+**Fired a second time on 2026-08-21, run `32505935997`** — the dev deploy of
+image `0.0.8` / Drupal SHA `ed8bd2d`. That run matched only *one* line, the
+openssl `req warning` above; the drush schema warning did not recur. Every
+other step passed, including "Run Dev Validation Tests". Verified by hand
+against the dev VM at `52.167.2.0` the same day: HTTPS `/health` 200 and HTTPS
+`/user/login` 200. Two benign boots, two red X's — the cry-wolf cost above is
+no longer hypothetical, so the gate was fixed rather than tolerated a third
+time.
+
+**The fix, applied 2026-08-21 at `build-on-dispatch.yml:511-542`.** The remote
+script now runs two greps instead of one. `(error|fatal|fail)` decides the
+exit status and its result is reported through a renamed `ERROR_EXIT` marker;
+a second, unconditional `grep -i warning` appends every warning under a
+`=== warnings (informational, do not fail the job) ===` banner. So warnings
+stay fully visible in the step summary — the diagnostic value is not lost —
+but only errors turn the job red. Still one `az vm run-command invoke`, which
+matters: that call costs ~90s of the step's runtime, so splitting it in two
+would have doubled it.
+
+**Verified before commit, not after.** The workflow parses as YAML, and the
+exact gate logic was replayed locally against a synthetic
+`cloud-init-output.log`: with the two known benign warnings alone it reports
+`ERROR_EXIT=1` and passes; with an `ERROR:` line added it reports
+`ERROR_EXIT=0` and fails. Both warnings print in both cases. **This has not
+yet run in CI** — the next `drupal-dev-merge` dispatch is its first real
+execution, and by the standing rule below, that green is not proof either.
+
+**The production gap is unchanged. This gate exists only in
+`build-on-dispatch.yml`.** `deploy-on-main-merge.yml`
+has no equivalent step, which is why the production promotion later the same day
+reported green. The fix above does **not** cover production; production still has
+no cloud-init log gate at all, which stays open.
 
 ### A stale `image_version` in tfvars could silently reimage production backwards — guarded 2026-08-19
 

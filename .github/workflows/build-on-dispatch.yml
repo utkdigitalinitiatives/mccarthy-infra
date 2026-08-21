@@ -536,15 +536,18 @@ jobs:
           DEV_RG: ${{ vars.PROJECT_NAME }}-dev-rg
         run: |
           {
-            echo "## Cloud-Init Errors"
+            echo "## Cloud-Init Log Scan"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Errors fail the job. Warnings are surfaced for diagnosis only --
+          # openssl and drush both emit benign warnings on every healthy boot,
+          # so failing on them made a correct deploy report red.
           OUTPUT=$(az vm run-command invoke \
             --command-id RunShellScript \
             --name "$VM_NAME" \
             --resource-group "$DEV_RG" \
-            --scripts "grep -iE '(error|fatal|fail|warning)' /var/log/cloud-init-output.log; echo \"GREP_EXIT=\$?\"" \
+            --scripts "grep -iE '(error|fatal|fail)' /var/log/cloud-init-output.log; echo \"ERROR_EXIT=\$?\"; echo '=== warnings (informational, do not fail the job) ==='; grep -i warning /var/log/cloud-init-output.log" \
             --query "value[0].message" -o tsv 2>&1)
 
           echo "$OUTPUT"
@@ -554,7 +557,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # grep exits 0 only when it actually matched something
-          if echo "$OUTPUT" | grep -q "GREP_EXIT=0"; then
+          if echo "$OUTPUT" | grep -q "ERROR_EXIT=0"; then
             echo "::error::Errors detected in cloud-init logs (see step summary)"
             exit 1
           fi
