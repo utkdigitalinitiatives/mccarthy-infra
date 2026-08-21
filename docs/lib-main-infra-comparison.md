@@ -149,6 +149,97 @@ person."* Likewise:
   lib-main must be re-addressed (a full production-network rebuild) before it
   can peer to shared Solr.
 
+## Image lifecycle: pitfalls found 2026-08-21
+
+Nothing in either repo pruned images. Both piles had grown since day one and the
+bill was already real. Everything below applies to **any** site publishing into the
+shared gallery, so treat it as day-one work for the next one, not cleanup to do later.
+
+**Nothing prunes by default, and the growth is invisible.** Packer creates one
+intermediate managed image *per build*, each with a unique name so they never
+overwrite, and every gallery version is kept forever. lib-main reached 103 gallery
+versions of which **3** were booted, plus 103 scratch images, at ~17 new images a
+month. The storage shows up as a single `LRS Snapshots` meter on the images resource
+group — 1,785 GB-months in July 2026 — so it never looks like an image problem when
+you read the bill.
+
+**A dead build leaves a VM *running*, and that is the expensive part.** A cancelled
+lib-main base build left a `Standard_D2s_v5` running ~50 days at **$95/month** — more
+than the production resource group. GitHub caps a job at 6 hours, so a hung build
+burns 6 hours and is then killed *without* running any cleanup step of its own. The
+only reliable fix is to sweep at the **start of the next build**, never at the end of
+its own.
+
+**There are two leak shapes, and your permission model picks which one you get.**
+This is the trap most likely to catch a new site:
+
+| `build_resource_group_name` | What Packer does | What a dead build leaks | Sweep needed |
+|---|---|---|---|
+| unset (lib-main) | creates a throwaway `pkr-*` RG | the **whole group** — easy to spot | `sweep-build-groups` |
+| set (mccarthy) | builds inside an existing RG | loose `pkrvm`/`pkrni`/`pkros` and **no group to find** | `sweep-build-resources` |
+
+mccarthy sets it because its service principal holds Contributor on five named
+resource groups and nothing wider, so it *cannot* create a resource group — see
+`packer/variables.pkr.hcl`. Least privilege is the right call and should carry
+forward, but it silently changes the leak shape. **A sweep written for one shape will
+not see the other**, while the running-VM bill is identical. Any new site must check
+which shape its permissions force before assuming it is covered.
+
+Related trap already recorded in that variable's docs: when the permission is missing,
+**Packer reports `AuthorizationFailed` as "a resource group with that name already
+exists"**, which is not what happened.
+
+**Deleting a scratch managed image is safe.** The published gallery version keeps its
+own replicated copy; `storageProfile.source.id` is provenance metadata only. Verified
+empirically before the batch delete — deleted one, re-read its gallery version, still
+`Succeeded` — not assumed.
+
+**Prune by discovery, never by allowlist.** lib-main's first cut listed the two
+`drupal-*` image definitions explicitly, which would have let mccarthy and every
+future site grow forever while looking solved. It now enumerates image definitions at
+run time, so a new site is covered the day it first publishes with no edit. This is
+the shared-gallery coupling in lesson 4 coming due exactly as predicted: **a new site
+inherits the gallery's housekeeping automatically, but only if the housekeeping was
+written to expect it.**
+
+**Two races worth copying, both nearly shipped as bugs:**
+
+- A gallery version being published *right now* can have **no `publishedDate`**.
+  Sorting newest-first with an empty-string default puts it at the *bottom* of the
+  list — i.e. first in line to delete. A build's own fresh image would have been the
+  first casualty. Skip anything whose `provisioningState` is not `Succeeded`.
+- Sort by `publishedDate`, **not** by name. Name order is lexical, so `0.0.9` sorts
+  above `0.0.10` and the keep-newest window holds the wrong versions.
+
+**Operational notes.** `az sig image-version delete` takes ~2 minutes each serially —
+80 of them is ~3 hours — but Azure ran 64 in parallel happily, so submit with
+`--no-wait` and poll. Give every sweep an age floor of 24h: a GitHub job cannot exceed
+6h, so nothing belonging to a running build can ever qualify. Report anything missing
+a `BuildDate` tag rather than deleting it. And do not schedule the prune on the same
+day as the base image build.
+
+### For the next site, on day one
+
+1. Decide the leak shape — does the service principal allow creating resource groups?
+   Set `build_resource_group_name` if not, and wire the **matching** sweep.
+2. Delete the build's own intermediate managed image at the end of every build, in the
+   repo that owns the build. This is the one piece that should live per-repo, so it
+   dies with the repo that creates the mess.
+3. Confirm the shared gallery prune discovers definitions rather than listing them, so
+   the new site is covered without an edit there.
+4. Check `az group list --query "[?starts_with(name,'pkr-')]"` is empty and the scratch
+   image count is low. Both should stay near zero, not merely "not huge".
+
+### The coupling to know about before relying on any of this
+
+The shared gallery, `lib-main-images-rg`, and the monthly base image all live in
+**lib-main-infra**, and mccarthy has no base image build of its own. Retiring or moving
+lib-main breaks every other site's builds on their next merge — no gallery, no base
+image, no housekeeping. The clean fix is to extract the shared layer into its own repo
+so no site repo owns it; deferred 2026-08-21 because moving the gallery means Terraform
+state surgery plus new CI credentials. **Revisit this before standing up a third site**,
+since that is the point where the cost of leaving it stops being theoretical.
+
 ## The lessons, distilled
 
 1. **Silent success is the worst failure mode.** The auto-stop runbook that
@@ -192,8 +283,22 @@ person."* Likewise:
    what surfaced lib-main's most serious latent problem (the Asimov CIDR
    collision, now the top blocker in lib-main's own TODO).
 
+8. **Anything that only accumulates will accumulate until someone measures it.**
+   No workflow in either repo deleted an image, ever, and the cost hid inside a
+   single snapshot meter while a forgotten build VM out-billed production. The
+   fixes that matter are structural rather than tidy-up: sweep at the *start* of
+   the next run, because a killed run cannot clean up after itself; prune by
+   discovering what exists rather than listing what you remember, or the next site
+   silently inherits the old problem; and check which failure shape your own
+   permission model produces before assuming someone else's sweep covers you.
+
 ## Follow-ups surfaced by the comparison
 
+- **Image cleanup is now wired into this repo's build** (2026-08-21): a
+  `delete-scratch-image` step after the Packer build, and `sweep-build-resources`
+  before it, using `.github/scripts/packer-cleanup.sh`. That script is a **copy** of
+  lib-main-infra's and can drift — its header says so. The shared gallery prune stays
+  in lib-main-infra; see "Image lifecycle: pitfalls found 2026-08-21" above.
 - `environments/dev/cloud-init.tftpl` has a self-signed cert subject of
   `/CN=dev-vm/O=/OU=dev` — the empty `O=` looks like an incomplete substitution
   when de-lib-main-ifying it (harmless; openssl accepts it).

@@ -168,6 +168,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Using base image version: $VERSION"
 
+      # This repo passes build_resource_group_name, so Packer builds inside an
+      # existing RG. A cancelled build therefore leaks loose pkrvm/pkrni/pkros
+      # resources - a build VM that keeps billing - with no pkr-* group to find.
+      # A dead build cannot tidy up after itself, so the next build does it.
+      - name: Sweep stray Packer build resources
+        run: |
+          .github/scripts/packer-cleanup.sh sweep-build-resources \
+            "${{ vars.BUILD_RESOURCE_GROUP || vars.GALLERY_RESOURCE_GROUP }}" 24
+
       - name: Build image
         working-directory: packer
         env:
@@ -195,6 +204,18 @@ jobs:
             -var "drupal_repo=$DRUPAL_REPO" \
             -var "drupal_ref=$DRUPAL_REF" \
             .
+
+      # Packer always leaves an intermediate managed image behind on the way to the
+      # gallery version. Nothing ever boots it, so delete it here - the published
+      # gallery version keeps its own copy. This repo cleans up after its own
+      # builds rather than relying on lib-main-infra's monthly sweep, so the
+      # cleanup lives and dies with the builds that create the mess.
+      - name: Delete intermediate managed image
+        if: always()
+        run: |
+          .github/scripts/packer-cleanup.sh delete-scratch-image \
+            "${{ vars.GALLERY_RESOURCE_GROUP }}" \
+            "${{ vars.PROJECT_NAME }}-rocky9-${{ steps.version.outputs.version }}"
 
       - name: Build Summary
         run: |
