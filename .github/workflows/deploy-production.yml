@@ -208,3 +208,40 @@ jobs:
             echo ""
             echo "Rolling update completed. Verify the application at the URL above."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fetch Postmark token from Key Vault
+        if: always() && steps.vmss.outputs.application_url != ''
+        env:
+          SECRETS_RG: ${{ vars.PROJECT_NAME }}-secrets-rg
+        run: |
+          KV_NAME=$(az keyvault list -g "$SECRETS_RG" --query "[0].name" -o tsv)
+          TOKEN=$(az keyvault secret show --vault-name "$KV_NAME" \
+            --name shared-postmark-api-token --query value -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "POSTMARK_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # A manual production deploy is a rollback or an emergency, so the team
+      # needs to hear about it more than they need to hear about a routine
+      # merge. This mirrors the notification in deploy-on-main-merge.yml and
+      # adds who started it, which only exists on the manual path.
+      - name: Email Notification - Manual Production Deploy
+        if: always() && steps.vmss.outputs.application_url != ''
+        uses: dawidd6/action-send-mail@v18
+        with:
+          server_address: smtp.postmarkapp.com
+          server_port: 587
+          username: ${{ env.POSTMARK_TOKEN }}
+          password: ${{ env.POSTMARK_TOKEN }}
+          subject: "Manual Production Deploy ${{ job.status == 'success' && 'Complete' || 'Failed' }} - ${{ inputs.image_version }}"
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          from: ${{ vars.NOTIFY_EMAIL_FROM }}
+          body: |
+            Manual production deployment ${{ job.status }}.
+
+            Started by: ${{ github.actor }}
+            Application URL: ${{ steps.vmss.outputs.application_url }}
+            Image Version: ${{ inputs.image_version }}
+
+            View workflow run:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        continue-on-error: true
