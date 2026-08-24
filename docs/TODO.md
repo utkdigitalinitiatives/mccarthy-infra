@@ -21,8 +21,9 @@ The two README pointers removed on 2026-08-19 stay removed — the tracked
 `git log --all -- docs/developer-onboarding.md`: **the file has never been
 committed on any branch**, so there is nothing in history to purge, and
 `git check-ignore -v` still resolves it to the `.gitignore` line. Note this does
-**not** close item 6's real point — no part of the developer-side path has been
-executed yet. Only the publish-the-doc instruction is retired.
+**not** close item 6's real point — that was still unexecuted as of 2026-08-21.
+Only the publish-the-doc instruction is retired here. **Item 6 itself closed on
+2026-08-23**, when a developer ran the path end to end.
 
 **2026-08-21: production moved to image `0.0.8`, and the day is worth reading in
 order because the two halves look unrelated and are not.**
@@ -140,12 +141,20 @@ consecutive reimage.
    that was sitting there has since been deleted by hand. The new `.gitignore`
    covers the Composer-managed paths, `sites/*/files`, `settings.local.php`, and
    `*.sql` / `*.sql.gz` / `*.dump`.
-6. **None of the developer-side path has ever been executed.**
-   `docs/developer-onboarding.md` and the five files on `feat/local-dev-tooling`
-   were written against verified facts, but `ddev start`,
-   `ddev composer install`, `ddev refresh-local` and `ddev pull-assets` have not
-   been run by anyone, here or on a developer's machine. Treat the first
-   developer through it as the test and fold what breaks back in.
+6. ~~**None of the developer-side path has ever been executed.**~~ — **executed
+   end to end 2026-08-23.** A developer ran the full path on their own machine —
+   `ddev start`, `ddev composer install`, `ddev refresh-local` and
+   `ddev pull-assets` — and reached a working local site. This was the standing
+   test named below, and it passed. The five files merged by PRs #9 and #10, and
+   the local `docs/developer-onboarding.md`, are therefore no longer unrun.
+
+   **Caveat, recorded honestly: nothing about the run was captured here.** The
+   developer, the date of their session, the DDEV version, and whether anything
+   broke and had to be worked around are all unrecorded — confirmed to the
+   operator verbally on 2026-08-23 and written down from that alone. So the path
+   is proven to work once, and **no fix the run may have needed has been folded
+   back into the tooling or the doc.** If a second developer hits a wall, do not
+   assume it is new.
 
    **The doc itself is gitignored on purpose and exists only on the operator's
    machine**, added to `.gitignore` on 2026-08-19. It is not missing and it was
@@ -296,6 +305,86 @@ destroys them, with nothing logged.
 ---
 
 ## Open
+
+### Proposed: migrate both sites off Packer VMs onto containers on Asimov — decision doc written, nothing executed
+
+**Written 2026-08-24, prompted by the build-time pain (~20 min per dev merge,
+`packer/mccarthy-rocky9.pkr.hcl:13`). The full assessment, target architecture,
+phased plan, and spike list are in `docs/aks-migration-assessment.md` — this
+entry is the pointer, not the content.** The short version: no document in
+either repo ever chose VMs over containers (the design is inherited from the
+initiateAzure POC); the four 2025-11→2026-02 containerization attempts each
+died one step short on problems that now have written fixes; production's
+az_blob_fs setup already proves the code-local/media-in-Blob split that makes
+Drupal containerizable; and neither site is truly live, so this is the
+cheapest moment there will ever be. Strategic, not urgent — **this entry does
+not displace the entry below as the tactical resume point.** Next action when
+picked up: the pre-work (credential rotation — the exact items and their
+locations are listed in the doc's History section, and are deliberately not
+repeated here because this repository is public — plus a
+`bootstrap/azure-setup.sh` pass for SP scope), then the eight Phase-0 spikes,
+which are disposable and touch no production resource. Two side-findings worth
+having regardless of the decision: `sites/default/files` would become durable
+for the first time (the silent-loss trap in "The one thing the devs will break
+silently" above), and the unapplied `feat/drupal-solr-search` peering design
+would be superseded entirely by in-cluster Solr access — do not build it out in
+the meantime.
+
+
+### Production never reads its own boot log, and a red dev run does not block promotion
+
+**Two separate gaps, both surfaced 2026-08-21 by the `0.0.8` deploy. Neither is
+fixed. This is the resume point for the next session.**
+
+**Gap 1 — `deploy-on-main-merge.yml` has no cloud-init log step at all.** Not a
+broken one; none. Its `Health Check` step runs three gates and they are good
+ones — HTTP `/health`, HTTPS `/health`, and HTTPS `/user/login` asserting both a
+200 *and* the `user_login_form` marker in the body. Those passed on run
+`32517237768`. But nothing reads `/var/log/cloud-init-output.log` on the
+production instance, so **"no errors surfaced" is not evidence that there were
+none — nothing looked.** The same benign openssl `warning` that turned the dev
+run red is almost certainly in production's boot log too, along with anything
+worse. Dev is noisy, production is silent, same boot.
+
+The obvious fix is to port the now-corrected step from
+`build-on-dispatch.yml:532-563`, adapted from `az vm run-command invoke` on the
+dev VM to `az vmss run-command invoke` with an `--instance-id`. Deliberately not
+done in the same session as the gate fix: the ported step has never run, and
+adding a *failing* gate to the production promotion path is a change that can
+only be tested by promoting to production.
+
+**An attempt to read production's boot log by hand was blocked** by the agent's
+own permission classifier, on the grounds that it executes a script on a
+production VM. Not a defect — the command is fine, run it manually:
+
+```
+az vmss run-command invoke -g mccarthy-production-rg \
+  -n mccarthy-production-vmss --instance-id 1 --command-id RunShellScript \
+  --scripts "grep -icE '(error|fatal|fail)' /var/log/cloud-init-output.log; \
+             grep -ic warning /var/log/cloud-init-output.log" \
+  --query "value[0].message" -o tsv
+```
+
+Two numbers out: error count, then warning count. ~90s. **Do this before
+deciding how the gate should behave** — if production's log carries dozens of
+benign warnings, a ported gate needs the same warnings-do-not-fail split, and if
+it carries real errors, that is a live finding rather than a tooling question.
+
+**Gap 2 — a red dev run does not stop the promotion, and nothing says so.**
+Image `0.0.8` was promoted to production about two hours after the dev run that
+built it reported failure. `deploy-on-main-merge.yml` resolves the newest image
+out of the gallery in its `Get latest image version` job and has **no opinion
+about how the dev run that built it exited**. On 2026-08-21 that was harmless —
+the image was good and the gate was wrong. The general case is not. Note this
+interacts badly with the fix that shipped the same day: a *quieter* dev gate
+makes a genuinely red dev run rarer and therefore more meaningful, which makes
+silently ignoring it worse, not better.
+
+No fix is proposed here, because the options differ in kind and the choice has
+not been made: gate the promotion on the dev run's conclusion; require a
+human-set "verified on dev" marker; or accept the gap and document it as
+deliberate. Decide before building.
+
 
 ### `config:import` cannot install az_blob_fs — the first deploy of the blob wiring broke dev while its health check passed
 
@@ -622,6 +711,20 @@ App-repo side:
   human-approval half no longer does. Remove it now that the production path is
   proven — otherwise the control only binds people who are not the person who
   normally merges. `dev-review` on `refs/heads/dev` still has `bypass_actors: []`.
+
+  **A second reviewer now exists — resolved 2026-08-23.** `mccarthy-index` has
+  three admin collaborators besides the operator: `mkaljns` (`33734588`),
+  `dshaw11` (`130399819`) and `di-aaron` (`132942973`). The two-person loop is
+  live and proven, not just possible: PR #11 (`dev` ← `record-feed`) and PR #12
+  (`main` ← `dev`) were both authored by `di-aaron` and each carries an
+  `APPROVED` review from `WilliamVeale`, merged 2026-08-21. Neither needed
+  `--admin`, which is the first time that has been true in this repo.
+
+  **This removes the last justification for the bypass actor above, and the
+  bypass actor is still in place.** Verified 2026-08-23 against
+  `GET /repos/utkdigitalinitiatives/mccarthy-index/rulesets/20642960`:
+  `dev-to-main` is unchanged since 2026-08-11 and still carries `26966411` at
+  `bypass_mode: "always"`. The reason it was added no longer applies. Remove it.
 - still no root `.gitignore`, so `vendor/` and `web/core/` are one `git add -A`
   away. Mitigate in the meantime with `composer update <pkg> --no-install`, which
   updates `composer.lock` without ever materialising `vendor/`.
@@ -1051,41 +1154,163 @@ a needless reimage of production and the risk that it becomes routine.
 
 ---
 
-### Nothing prunes images in the shared resource group
+## Resolved
 
-**Observed 2026-08-03.** Pre-existing and mostly lib-main's, but mccarthy now
-contributes to it, so it is recorded here rather than only in lib-main-infra.
+### Deploy email reached one person, and the manual production path told nobody — fixed 2026-08-24
 
-`lib-main-images-rg` holds **89 intermediate managed images** (81 `drupal-rocky9-*`,
-7 `drupal-base-rocky9-*`, 1 `mccarthy-rocky9-*`), each declaring a 64 GB OS disk,
-plus **80 gallery versions** under `drupal-rocky-linux-9`. Both grow by one per
-build and neither is ever cleaned up.
+**Both halves of this were invisible in the repo, which is why they lasted.**
 
-The intermediate managed image is a Packer implementation detail — it captures to
-a managed image, then publishes that into the gallery. Once the gallery version
-exists the managed image has no consumer, so all of the old ones are dead weight.
-Gallery versions are at least defensible for rollback; 80 is not.
+**Half 1 — the recipient list was one address.** `NOTIFY_EMAIL_TO` was
+`wveale@utk.edu` and nothing else, so every "Dev VM Ready" and every "Production
+Deploy" mail went to the operator alone. It is now four:
 
-Billing is on used capacity, not the provisioned 64 GB, so the real cost is well
-below what the raw numbers suggest — worth measuring before acting.
+```
+wveale@utk.edu,aalbro@utk.edu,dshaw11@utk.edu,mcheeti1@utk.edu
+```
 
-Not fixed here because deleting image history is not this project's call, and any
-prune has to account for which versions running VMSS instances are pinned to.
+**Read this before hunting for that list in a file — it is not in one.** It is a
+GitHub Actions *repository variable*, so it lives on GitHub, never appears in a
+diff, and will never show up in `git log`. No email address is hardcoded in any
+workflow (verified: `grep -rn "@utk.edu" .github/workflows/` returns nothing).
+Inspect or change it with:
+
+```
+gh variable get NOTIFY_EMAIL_TO
+gh variable set NOTIFY_EMAIL_TO --body "a@utk.edu,b@utk.edu"
+```
+
+or in the browser under *Settings → Secrets and variables → Actions →
+Variables*. `dawidd6/action-send-mail` takes the comma-separated list straight
+through; `bootstrap/azure-setup.sh:345` already documented that format.
+
+**Half 2 — `deploy-production.yml` had no notification steps at all.** Not a
+broken one; none. That workflow is the manual rollback and emergency path, so
+the deploy most worth announcing was the one that announced nothing — not to the
+team, not even to the operator who started it. Fixed in `cb8c311` (PR #2, merged
+`9672acf`) by porting the two steps from `deploy-on-main-merge.yml`: fetch the
+Postmark token from Key Vault (`shared-postmark-api-token`, in the
+`mccarthy-secrets-rg` vault), then send. Two deliberate differences from the
+merge path — the subject says **Manual**, so a rollback is distinguishable from a
+routine promotion, and the body carries `github.actor`, which only exists where a
+human pressed the button. There is no `drupal_sha` here: this path deploys an
+image version the operator types, not a commit.
+
+**Two things this did NOT do, both of which matter later.**
+
+1. **The new steps have never run.** `deploy-production.yml` is still on the
+   never-executed list at the bottom of this file, and this repo's standing
+   lesson is that every first run fails on a different latent defect. Both steps
+   are `if: always()` and the mail step is `continue-on-error: true`, so a
+   Postmark failure cannot fail a deploy that worked — but that also means a
+   silent breakage here will not announce itself.
+2. **No recipient has confirmed receipt.** The three new addresses have never
+   received mail from this sender (`mccarthy-infra <wveale@utk.edu>`). Treat the
+   next dev build as the test and ask them to check spam; a first message from a
+   new sender is routinely filtered. If nobody gets it, the fault is Postmark or
+   the sender signature, not the variable.
+
+**Incidental finding worth keeping, because it contradicts the sibling repo.**
+All six workflows here were checked for their triggers: `repository_dispatch`
+(×2), `workflow_dispatch` (×4), `schedule` (×1). **Nothing in `mccarthy-infra`
+fires on `push`.** So a merge to `main` here is safe and does not touch
+production — the exact opposite of `mccarthy-index`, where a comment-only merge
+to `main` drives a full production deploy (still open, above). Do not carry the
+caution from that repo into this one.
+
+### Nothing pruned images in the shared resource group — pruned 2026-08-23
+
+**Observed 2026-08-03, cleared 2026-08-23.** Pre-existing and mostly lib-main's,
+but mccarthy contributed to it, so it is recorded here rather than only in
+lib-main-infra.
+
+**Was:** `lib-main-images-rg` held **89 intermediate managed images** (81
+`drupal-rocky9-*`, 7 `drupal-base-rocky9-*`, 1 `mccarthy-rocky9-*`), each
+declaring a 64 GB OS disk, plus **80 gallery versions** under
+`drupal-rocky-linux-9`. Both grew by one per build and neither was ever cleaned
+up.
+
+**Now, verified 2026-08-23 against Azure:** `az image list -g lib-main-images-rg`
+returns **1** — `mccarthy-rocky9-0.0.8`, the image production currently runs.
+`az sig image-version list ... --gallery-image-definition drupal-rocky-linux-9`
+returns **10**: `0.0.89` through `0.0.98`, the newest ten. So the intermediate
+managed images are gone apart from the one in use, and gallery history is capped
+at ten for rollback.
+
+The intermediate managed image was always a Packer implementation detail — it
+captures to a managed image, then publishes that into the gallery. Once the
+gallery version exists the managed image has no consumer, which is why deleting
+88 of them costs nothing.
+
+**The prune itself was manual `az`, but automation to keep it bounded now exists
+— and has never deleted anything.** Two halves, both merged 2026-08-21, both
+unproven:
+
+- **The shared gallery prune lives in `lib-main-infra`**, which owns the gallery:
+  `.github/workflows/gallery-prune.yml` plus `.github/scripts/gallery-prune.py`
+  (commit `d99851c`, PR #13 `fix/packer-image-sprawl`). It discovers image
+  definitions at run time rather than listing them, **so this project is covered
+  with no edit there** — proven by dry run `32514643891`, which found
+  `mccarthy-rocky-linux-9` and planned `0.0.8` and `0.0.7` as `(live)` and
+  `0.0.6` / `0.0.5` / `0.0.4` as `(recent)`, deleting none. The keep rule is the
+  newest 10 per definition plus anything a live VM or VMSS references anywhere in
+  the subscription; `drupal-base-rocky-linux-9` overrides to 3.
+- **This repo cleans up after its own builds.** `build-on-dispatch.yml` sweeps
+  stray `pkrvm` / `pkrni` / `pkros` resources *before* each build and deletes its
+  intermediate managed image *after* (`.github/scripts/packer-cleanup.sh`, commit
+  `c30052e`). The sweep is written for this repo's leak shape specifically:
+  passing `build_resource_group_name` makes Packer build inside an existing
+  group, so a dead build leaves loose resources and **no `pkr-*` group for
+  lib-main's group sweep to find**, while billing for a running VM just the same.
+
+**Neither half has executed for real, and that is the open risk.** Run
+`32514643891` was a `workflow_dispatch` with `apply` unticked, so it took the
+dry-run branch — and it had nothing to delete regardless, because the manual
+prune had already run. `gallery-prune.yml`'s cron is `0 4 15 * *` and the commit
+landed on the 21st, so **the first scheduled real prune is 2026-09-15.** On this
+side, the cleanup steps landed at `18:34Z` on 2026-08-21 while the last build
+(`0.0.8`, run `32505935997`) started at `17:00Z` the same day — **before** them.
+So `delete-scratch-image` has never run here either. Watch both.
+
+**One leftover is still sitting there, and it should clear itself.**
+`az image list -g lib-main-images-rg` returns `mccarthy-rocky9-0.0.8`. That is
+the **scratch** image, not the one production boots — the VMSS references the
+gallery version
+`.../galleries/lib_main_gallery/images/mccarthy-rocky-linux-9/versions/0.0.8`,
+verified 2026-08-23. It survived the 2026-08-21 sweep only because every sweep
+ignores anything under 24h old, and it was hours old at the time. It is now well
+past that. **If it is still there after 2026-09-15, the sweep does not work.**
+
+**The rule that made it safe still applies to the next prune.** A gallery version
+can be pinned by a running VMSS. Always check
 `az vmss show --query virtualMachineProfile.storageProfile.imageReference.id`
 before deleting anything.
 
 ---
 
-### lib-main must move off `10.0.0.0/16` before it goes live
+### lib-main had to move off `10.0.0.0/16` before going live — moved 2026-08-23
 
-Not this repo's change, but it constrains the shared Solr plan and is recorded
-here so the dependency is visible. lib-main's production VNet collides with the
-Asimov AKS service CIDR. See the README's VNet address allocation section, and
+lib-main's production VNet collided with the Asimov AKS service CIDR, which
+constrained the shared Solr plan. Not this repo's change, and it is recorded here
+because the dependency was visible from this side.
+
+**Resolved. Verified 2026-08-23 with `az network vnet list`:**
+
+| VNet | Resource group | Prefix |
+|---|---|---|
+| `drupal-production-vnet` | `lib-main-production-rg` | **`10.20.0.0/16`** |
+| `mccarthy-production-vnet` | `mccarthy-production-rg` | `10.10.0.0/16` |
+| `aks-vnet-36013409` | `MC_rg-asimov_Asimov_eastus2` | `10.224.0.0/12` |
+
+lib-main is on `10.20.0.0/16`. No overlap with mccarthy, and none with the Asimov
+AKS range. The Solr dependency is unblocked from the addressing side.
+
+One subscription VNet is still on the old range — `vireo-vnet` in `rg-vireo`,
+`10.0.0.0/16`. That is a **different project**, not lib-main, and is out of scope
+here; noted only so a future reader who greps for `10.0.0.0/16` and finds a hit
+does not reopen this entry. See the README's VNet address allocation section, and
 lib-main-infra's own `README.md` / `docs/TODO.md` / `CLAUDE.md`.
 
 ---
-
-## Resolved
 
 ### The cloud-init log gate failed on the word `warning`, so a correct deploy reported red — fixed 2026-08-21
 
@@ -1135,7 +1360,7 @@ against the dev VM at `52.167.2.0` the same day: HTTPS `/health` 200 and HTTPS
 no longer hypothetical, so the gate was fixed rather than tolerated a third
 time.
 
-**The fix, applied 2026-08-21 at `build-on-dispatch.yml:511-542`.** The remote
+**The fix, applied 2026-08-21 (`f46160f`), at `build-on-dispatch.yml:532-563`.** The remote
 script now runs two greps instead of one. `(error|fatal|fail)` decides the
 exit status and its result is reported through a renamed `ERROR_EXIT` marker;
 a second, unconditional `grep -i warning` appends every warning under a
@@ -1884,9 +2109,14 @@ off this list on their first try: the **blob restore branch of `tls-setup.sh`**
 pre-install block** (first render, ran clean against the no-modules production
 DB).
 
-Paths that have still never executed, as of 2026-08-18:
+Paths that have still never executed, as of 2026-08-24:
 
-- `deploy-production.yml` in full.
+- `deploy-production.yml` in full. **It grew two more unrun steps on 2026-08-24**
+  — a Key Vault token fetch and an email notification, ported from
+  `deploy-on-main-merge.yml` where they do work. Ported code is not proven code;
+  see the Resolved entry. Both are `if: always()` and the mail step is
+  `continue-on-error: true`, so neither can fail the deploy — which also means
+  neither will announce its own breakage.
 - The `pr_number` / per-PR ephemeral variant of the dev stack. It is vestigial —
   no workflow sets `TF_VAR_pr_number` — and it could not work as written anyway,
   since `mccarthy-dev-pr-N-rg` is not one of the five groups the SP can touch.
