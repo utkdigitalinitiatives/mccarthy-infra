@@ -293,6 +293,23 @@ against an external Solr; mccarthy uses core `search`. Adding Solr here is real
 infra work but it is pointless until there is content and a working search
 requirement.
 
+**When Solr is built here, the private DNS zone name is already decided —
+`search.utklib.internal`, Drupal host `solr.search.utklib.internal`.** Decided
+in lib-main-infra on 2026-09-11 (`feat/drupal-solr-search`, commit `186e8c6`;
+their earlier name `lib-main.internal` is gone). Every site uses the **same
+zone name**, but **this repo builds its own zone**: its own
+`azurerm_private_dns_zone` in `mccarthy-production-rg`, linked only to
+`mccarthy-production-vnet`, with an A record `solr` → the shared internal LB IP
+(`10.224.255.10` at time of writing — confirm against lib-main-infra
+`environments/production/variables.tf` `solr_internal_lb_ip`). Azure allows the
+same private zone name in different resource groups as long as each links
+different VNets. **Do not link this VNet to lib-main's zone.** A VNet link is a
+child of the zone, so it would be created in `lib-main-production-rg` and owned
+by lib-main's Terraform state — retiring lib-main would then break this site's
+search, the same trap as the shared image gallery. The shared SolrCloud itself
+is still `solr-mainsite` in asimov (decided 2026-09-11 to share it; per-site
+collection + scoped user + password in `mccarthy-kv-553468f1`).
+
 **The one thing the devs will break silently.** `az_blob_fs` is installed,
 configured, and **has never executed a single read or write on this site** —
 verified 2026-08-18: `record` has 18 field storages, all string / string_long /
@@ -1151,6 +1168,66 @@ merges to `main` and never deploys, and nothing reports red.
 
 Note that the deploy itself was correct and green. Nothing is broken; the cost is
 a needless reimage of production and the risk that it becomes routine.
+
+---
+
+### Drupal auto-updates: automate the `composer.lock` PR, never the VM
+
+**Asked 2026-08-27 on `lib-main-infra`, recorded here because this site will
+face the same requirement.** Nothing was built in either repo. The question was
+whether Drupal's built-in Automatic Updates can be switched on if a mandate
+lands.
+
+**It cannot, and the reason is structural.** Drupal core's Automatic Updates /
+Package Manager patches the codebase on the *running* instance — here
+`/var/www/drupal`. This site is immutable-image: every deploy reimages the VM
+from the Packer image built by `build-on-dispatch.yml`. A self-applied patch
+survives until the next deploy and then disappears, with nothing reporting red.
+The drift is intermittent rather than clean, which is the worse shape: a nightly
+auto-stop/start only deallocates, so the OS disk keeps the patch and the site
+looks patched right up until the deploy that silently reverts it. It also puts
+running code out of sync with `mccarthy-index`, which this pipeline treats as
+authoritative.
+
+**The shape that fits: update the recipe, not the server.** A dependency bump
+lands as a `composer.lock` PR on `mccarthy-index`, merges to `dev`, and the
+existing chain does the rest — `dispatch-dev-merge.yml` → this repo's
+`drupal-dev-merge` handler → image build → dev VM, then `dev → main` →
+`drupal-main-merge` → `deploy-on-main-merge.yml` → production. **No change is
+needed in this repo.** `packer/ansible/playbook.yml:70` already runs `composer
+install --no-dev --optimize-autoloader` against the lock file, so a lock bump
+*is* the update. The mechanism is already proven — it is exactly how 11.4.5
+shipped on 2026-08-18.
+
+**The trap is already documented above, in Open.** Do not build this on
+Dependabot alone. "Dependabot does not report Drupal core advisories — `composer
+audit` does" (found 2026-08-10) is the standing lesson: Composer reads the
+drupal.org advisory database and Dependabot's feed does not cover it, so an empty
+Dependabot list is not evidence that the lock is clean. Dependabot *version
+updates* — the `.github/dependabot.yml` file, which is a different thing from the
+alerts UI — would still open a routine PR when a newer `drupal/core` is
+published, so it is a fine delivery mechanism. But the thing that decides "this
+one is urgent" must be `composer audit --locked`. That scheduled audit is already
+tracked as its own item; this entry is the delivery half and does not replace it.
+
+**State as of 2026-08-27.** `mccarthy-index` is on `drupal/core` **11.4.5**
+(`drupal/core-recommended: ^11.4`) and has **no** `.github/dependabot.yml` and no
+Renovate config — its `.github/workflows/` holds only `dev-to-main.yml`,
+`dispatch-dev-merge.yml`, `dispatch-main-merge.yml`. Dependabot *alerts* are
+nonetheless live on that repo; that is the default for a public repository and
+needs no file. So the missing piece is version-update PRs, not alerts.
+
+**When this is picked up**, write `mccarthy-index/.github/dependabot.yml` with
+`package-ecosystem: composer`, `directory: "/"`, and **`target-branch: dev`**.
+Targeting `dev` is not cosmetic — a merge to `main` fires
+`dispatch-main-merge.yml` and deploys production, and that path still carries no
+`paths-ignore` at all (see the entry above). Keep a human on the `dev → main`
+promotion at least at first: a core bump is a real upgrade with config and schema
+implications, as the 11.4.5 cycle recorded above.
+
+Renovate was the considered alternative and was set aside — better grouping and
+auto-merge rules for Drupal, but it needs a GitHub App install and a much larger
+config. Revisit only if Dependabot PR noise becomes a real problem.
 
 ---
 
