@@ -184,6 +184,10 @@ data "azurerm_shared_image_version" "newest" {
   image_name          = var.image_name
   gallery_name        = var.gallery_name
   resource_group_name = var.gallery_resource_group_name
+  # Without this, "latest" is the lexically greatest name, so once versions
+  # passed 0.0.9 the check below warned on every correct deploy that 0.0.9 was
+  # newer than 0.0.17. Same fix lib-main-infra applied.
+  sort_versions_by_semver = true
 }
 
 # A check block warns, it does not fail. That is deliberate: holding production
