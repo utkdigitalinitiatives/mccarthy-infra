@@ -8,7 +8,40 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — nothing blocking, production on `0.0.8`, as of 2026-08-21
+## Work in flight — production on `0.0.17`, Solr started, as of 2026-09-14
+
+**2026-09-14: the devs turned on Search API + Solr, and it reached production.**
+`mccarthy-index` PR #25 (`solr-settings` → `dev`) built image `0.0.17`
+(`build-on-dispatch.yml` run `34860407390`, green). On dev, `config:import`
+installed `search_api`, `search_api_solr`, `language` and the rest cleanly
+against a copy of the production DB, and `config:status` was clean. PR #26
+promoted `dev → main`; `deploy-on-main-merge.yml` run `34874538299` went green
+and the scale set runs `0.0.17`, `/user/login` 200. **Production's module state
+was not checked on the instance** — only the image and HTTP. Expected and
+harmless: the status report now shows `Could not resolve host: solr`, because
+the committed server `solr_mccarthy` points at the DDEV host until the connector
+overrides exist here. The index `records` is committed with `server: ''` and
+`status: false`, so nothing indexes and nothing contacts Solr. **The day the
+devs attach and enable it, this repo's connector overrides must already be
+live**, or every node save tries to reach `solr` from the VM.
+
+**Solr rollout — what is decided, built, and not.** Detail, names and evidence
+are in "Solr names are decided" and the paragraphs after it, further down this
+section.
+- Decided: share the running `solr-mainsite` cluster; server machine name
+  `solr_mccarthy`; collections `mccarthy_prod` / `mccarthy_dev` /
+  `mccarthy_local`; logins `drupal-mccarthy-prod` / `drupal-mccarthy-dev`.
+- Built (asimov `feat/drupal-solr-search` `6a933f8`, pushed, **not merged**):
+  the Security-API CronJob that creates those logins once the passwords exist.
+- **Not decided: build the VM network path now, or wait for the AKS migration.**
+  The Open AKS entry below says not to build the peering design meanwhile. The
+  VM path needs: peering to `aks-vnet-36013409`, an own `search.utklib.internal`
+  zone, the two KV passwords + ESO grant (with an `ASIMOV_ESO_PRINCIPAL_ID`
+  GitHub variable passed to both production workflows — lib-main's revert trap),
+  cloud-init connector overrides and the dev reindex. The asimov login work is
+  needed on either path.
+- Collections do not exist on the cluster (none do). The Drupal logins cannot
+  create them; an admin runs `upload-configset` once each.
 
 **2026-08-21: `docs/developer-onboarding.md` is permanently untracked. This is a
 decision, not a hold.** It was gitignored on 2026-08-19 pending a developer
@@ -86,7 +119,7 @@ neither urgent.
 | `feat/private-files-share` | **applied, verified, merged to `main`, branch deleted** 2026-08-19 — see Resolved |
 | Production `image_version` guard | shipped 2026-08-19 (`8d0446d`, `b9b5ffd`) — mandatory + staleness check, see Resolved |
 | `build-on-dispatch.yml` run `32505935997` | dev deploy of `0.0.8` / `ed8bd2d` — **succeeded**, reported red on the `warning` gate alone; site verified by hand at `52.167.2.0` |
-| The cloud-init `warning` gate | **fixed 2026-08-21** in `build-on-dispatch.yml` — errors fail, warnings only print. Never yet run in CI. |
+| The cloud-init `warning` gate | **fixed 2026-08-21** in `build-on-dispatch.yml` — errors fail, warnings only print. Ran green in CI 2026-09-14 (run `34860407390`): a warning printed, the job passed. |
 | `deploy-on-main-merge.yml` run `32517237768` | **green**, 2026-08-21 19:12-19:19Z — promoted `0.0.8` to production, dev VM cleaned up |
 | `mccarthy-infra` PR #1, `docs/image-cleanup-lessons` → `main` | merged `218389f` 2026-08-21 — Packer leak sweep + intermediate image delete |
 | Working tree / `origin/main` | clean, pushed. Two commits 2026-08-21 — the docs backlog, then the gate fix — **rebased onto `218389f`**, which had landed on `main` while they were being written. No conflicts: PR #1 edits the `build-image` job and README section 3; these edit the `deploy-dev` job and the README header. |
@@ -369,7 +402,8 @@ swapped it for the bootstrap Job, which only works on a new one
 (`lib-main-infra` `docs/drupal-solr-search-progress.md`, "Departure from the
 original plan"). Nothing about this is in the `lib-main` app repo.
 
-**Fix built 2026-09-14 on asimov `feat/drupal-solr-search`, uncommitted:** a
+**Fix built 2026-09-14 on asimov `feat/drupal-solr-search` (`6a933f8`, pushed,
+not merged):** a
 CronJob in `apps/production/solr-mainsite/drupal-users/` that adds and repairs
 Drupal logins through the Security API, tested against a local Solr 9.10.1 with
 the live rule order. Full record in lib-main-infra
