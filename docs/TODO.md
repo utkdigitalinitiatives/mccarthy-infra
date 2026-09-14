@@ -25,23 +25,102 @@ overrides exist here. The index `records` is committed with `server: ''` and
 devs attach and enable it, this repo's connector overrides must already be
 live**, or every node save tries to reach `solr` from the VM.
 
-**Solr rollout — what is decided, built, and not.** Detail, names and evidence
-are in "Solr names are decided" and the paragraphs after it, further down this
-section.
+**Solr rollout — decided 2026-09-14: build the VM network path now, do not
+wait for AKS.** Reasoning: the AKS migration is a proposal with no spikes run
+and no date; the devs already have the Solr modules on production; the part
+AKS would throw away (peering, one DNS zone, ~10 lines of cloud-init) is small,
+and everything else — passwords, ESO grant, asimov logins, collections, Drupal
+config — survives either way. Applying it here also proves lib-main's design,
+which has never been applied anywhere. Names and evidence are in "Solr names
+are decided" further down this section.
+
 - Decided: share the running `solr-mainsite` cluster; server machine name
   `solr_mccarthy`; collections `mccarthy_prod` / `mccarthy_dev` /
   `mccarthy_local`; logins `drupal-mccarthy-prod` / `drupal-mccarthy-dev`.
 - Built (asimov `feat/drupal-solr-search` `6a933f8`, pushed, **not merged**):
   the Security-API CronJob that creates those logins once the passwords exist.
-- **Not decided: build the VM network path now, or wait for the AKS migration.**
-  The Open AKS entry below says not to build the peering design meanwhile. The
-  VM path needs: peering to `aks-vnet-36013409`, an own `search.utklib.internal`
-  zone, the two KV passwords + ESO grant (with an `ASIMOV_ESO_PRINCIPAL_ID`
-  GitHub variable passed to both production workflows — lib-main's revert trap),
-  cloud-init connector overrides and the dev reindex. The asimov login work is
-  needed on either path.
+- **Built here on branch `feat/drupal-solr-search` (2026-09-14), validated,
+  planned against live state, NOT applied.** Ported from lib-main-infra's
+  branch with two deliberate departures:
+  - **The asimov ESO grant lives in `environments/secrets`, not production.**
+    That stack is manual-apply only, so CI never needs an
+    `asimov_eso_principal_id` variable — the exact trap that made lib-main PR
+    #15 unsafe. The principal ID (`1c62fb68-…a172e`, confirmed live with
+    `az identity show`) is the variable's default; it is not a secret.
+  - **`environments/dev` reads the dev password as a data source**, so a
+    devtest stack that has not been applied fails the plan, instead of a dev VM
+    that boots, fails `fetch-secrets.sh`, and serves nothing (lib-main's second
+    revert trap).
+  - Per stack: `secrets` → ESO Key Vault Secrets User. `devtest` → `random`
+    provider, `dev-solr-drupal-mccarthy-password`. `production` →
+    `production-solr-drupal-mccarthy-prod-password`, `data.azurerm_virtual_network.asimov`,
+    peerings `mccarthy-to-aks` / `aks-to-mccarthy`, own zone
+    `search.utklib.internal` + link + A record `solr` → `10.224.255.10`, seven
+    connector overrides for `search_api.server.solr_mccarthy` in
+    `environment.php`, `SOLR_PASSWORD` required in `fetch-secrets.sh`. `dev` →
+    the same overrides for `mccarthy_dev` / `drupal-mccarthy-dev`, plus the
+    guarded `search-api:clear` → `rebuild-tracker` → `index` after
+    `config:import` (the synced prod DB thinks everything is indexed). The
+    dev VM sits in the production VNet's `web-subnet` (GitHub variable
+    `SUBNET_ID`), so it inherits peering and DNS.
+  - Not copied from lib-main: the three cluster-level passwords
+    (`solr_admin` / `solr_internal` / `solr_operator`), dead since the CronJob
+    fix.
+- **Found while porting: the CI service principal has no rights on the AKS
+  network.** `az role assignment list` for the SP scoped to
+  `MC_rg-asimov_Asimov_eastus2` is empty, and neither repo's bootstrap ever
+  granted anything there. The reverse peering is a child of the AKS VNet, and
+  `deploy-on-main-merge.yml` plans `environments/production` on every main
+  merge — so with these resources in the stack and no grant, **every
+  production deploy fails on refresh with AuthorizationFailed.** lib-main has
+  the same unfound trap. Fix: `bootstrap/azure-setup.sh` now grants
+  **Network Contributor on the one VNet** `aks-vnet-36013409` (not the
+  resource group). **Must be run with PIM Owner before this branch merges.**
+  The local operator apply works without it (Owner).
+- **Plans against live state (read-only, 2026-09-14):** `secrets` 1 to add
+  (the role). `devtest` 2 to add (password + secret). `production` 7 to add, 5
+  to change, 0 to destroy — the 5 are the VMSS `custom_data` (a **reimage**)
+  plus four in-place updates on `random_password.drupal_admin`,
+  `random_password.drupal_hash_salt` and both storage accounts that list **no
+  changed attribute**; provider normalization, pre-existing, harmless. `dev`
+  validates; not planned (CI-only stack).
+- Live checks the same day: `10.224.255.10` free in the AKS VNet; the AKS VNet
+  has one peering (`asimov-to-vireo-db`, Connected); `mccarthy-production-vnet`
+  has none; no `search.utklib.internal` zone exists anywhere yet; no internal
+  LB frontend on `10.224.255.10` (asimov's `internal-lb.yaml` is unmerged).
+- **Side fix on the branch:** the `image_version_is_newest` check compared
+  version names as text, so it warned that `0.0.9` was newer than `0.0.17` on
+  every plan. `sort_versions_by_semver = true` on the `newest` data source —
+  lib-main's fix, one line.
 - Collections do not exist on the cluster (none do). The Drupal logins cannot
   create them; an admin runs `upload-configset` once each.
+
+**Apply order (nothing below has run):**
+1. PIM Owner. Grant the SP Network Contributor on the AKS VNet — either re-run
+   `bootstrap/azure-setup.sh` (idempotent) or the single `az role assignment
+   create` it contains.
+2. `environments/secrets` apply — the ESO grant. RBAC lag 1–2 min.
+3. `environments/devtest` apply — creates the dev password. **Before the next
+   dev deploy**, or that deploy's plan fails on the new data source.
+4. `environments/production` apply with `-var="image_version=0.0.17"` (confirm
+   with `az vmss list-instances` first). Expect a rolling reimage; verify
+   `/user/login` 200 during and after, and that both peerings show
+   `Connected`. From the instance, `getent hosts solr.search.utklib.internal`
+   → `10.224.255.10`; `curl` will refuse until step 5.
+5. asimov: uncomment `site-mccarthy.yaml` in
+   `apps/production/solr-mainsite/drupal-users/kustomization.yaml`, open and
+   merge the PR. Flux creates the internal LB on `10.224.255.10`, ESO syncs the
+   two secrets, the CronJob adds both logins within 30 min (or `kubectl create
+   job --from=cronjob/solr-drupal-users`). From the instance,
+   `curl -u drupal-mccarthy-prod:<pw> http://solr.search.utklib.internal:8983/solr/admin/info/system`
+   → 200; wrong password → 401.
+6. Create `mccarthy_prod` and `mccarthy_dev` as `admin`, once, with the devs'
+   configset (`drush search-api-solr:upload-configset` needs admin rights).
+7. Merge this branch to `main` (no workflow triggers on push here; the next
+   production deploy is the first CI plan with the peering in state — step 1
+   is what makes it pass).
+8. Only then tell the devs to attach `records` to `solr_mccarthy` and enable
+   it. Card #43 (`mccarthy_local` rename) stays cosmetic.
 
 **2026-08-21: `docs/developer-onboarding.md` is permanently untracked. This is a
 decision, not a hold.** It was gitignored on 2026-08-19 pending a developer
@@ -458,9 +537,10 @@ repeated here because this repository is public — plus a
 which are disposable and touch no production resource. Two side-findings worth
 having regardless of the decision: `sites/default/files` would become durable
 for the first time (the silent-loss trap in "The one thing the devs will break
-silently" above), and the unapplied `feat/drupal-solr-search` peering design
-would be superseded entirely by in-cluster Solr access — do not build it out in
-the meantime.
+silently" above), and the `feat/drupal-solr-search` peering design would be
+superseded by in-cluster Solr access. **Superseded 2026-09-14:** the VM Solr
+path is being built anyway (see "Work in flight"); the throwaway part is
+small and the rest survives the migration.
 
 
 ### Production never reads its own boot log, and a red dev run does not block promotion

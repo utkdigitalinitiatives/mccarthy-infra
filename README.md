@@ -121,9 +121,17 @@ ranges below are non-obvious:
 | `10.10.0.0/16` | mccarthy | allocated (this repo) |
 | `10.11.0.0/16` | — | free |
 | `10.12.0.0/16` | — | free |
-| `10.20.0.0/16` | lib-main | **reserved for re-addressing** — lib-main currently sits on `10.0.0.0/16` and cannot cleanly peer to Asimov until it moves. Must happen before it goes live. |
+| `10.20.0.0/16` | lib-main | allocated (lib-main-infra) — moved off `10.0.0.0/16` on 2026-08-23 |
 
 Within a site: `x.x.1.0/24` web subnet, `x.x.2.0/24` private endpoints.
+
+**Solr path, per site.** `environments/production` peers the site VNet with the
+Asimov node VNet in both directions and builds the site's **own** private DNS
+zone `search.utklib.internal` (A record `solr` → `10.224.255.10`, Solr's
+internal load balancer in the AKS VNet). Every site uses the same zone name and
+IP; no site links to another site's zone. The reverse peering lives in the
+AKS-managed resource group, so the CI service principal holds Network
+Contributor on that one VNet (granted by `bootstrap/azure-setup.sh`).
 
 Verify against reality before allocating — `az network vnet list -o table` is the
 authoritative source, not this table.

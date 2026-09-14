@@ -144,10 +144,9 @@ person."* Likewise:
   warning not to pick the Arm64 `Bpsv2` variants, which won't boot the x64
   images).
 - **VNet `10.10.0.0/16`** from an explicit allocation registry in the README.
-  Allocating mccarthy's range is how it was discovered that lib-main sits on
-  `10.0.0.0/16` — which collides with the Asimov AKS *service* CIDR, meaning
-  lib-main must be re-addressed (a full production-network rebuild) before it
-  can peer to shared Solr.
+  Allocating mccarthy's range is how it was discovered that lib-main sat on
+  `10.0.0.0/16` — which collides with the Asimov AKS *service* CIDR. lib-main
+  re-addressed to `10.20.0.0/16` on 2026-08-23 so it can peer to shared Solr.
 
 ## Image lifecycle: pitfalls found 2026-08-21
 
