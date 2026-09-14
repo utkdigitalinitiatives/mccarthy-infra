@@ -289,9 +289,10 @@ this day, both left for the devs deliberately:
   already installed if a styled default is ever wanted.
 
 **Queued behind the devs:** Solr. lib-main runs `search_api` + `search_api_solr`
-against an external Solr; mccarthy uses core `search`. Adding Solr here is real
-infra work but it is pointless until there is content and a working search
-requirement.
+against an external Solr; mccarthy has used Drupal's core `search` module (a
+module, not a Solr core). Adding Solr here is real infra work but it is pointless
+until there is content and a working search requirement. **The devs started on
+2026-09-14 with `mccarthy-index` PR #25** — see "Solr names are decided" below.
 
 **When Solr is built here, the private DNS zone name is already decided —
 `search.utklib.internal`, Drupal host `solr.search.utklib.internal`.** Decided
@@ -309,6 +310,86 @@ by lib-main's Terraform state — retiring lib-main would then break this site's
 search, the same trap as the shared image gallery. The shared SolrCloud itself
 is still `solr-mainsite` in asimov (decided 2026-09-11 to share it; per-site
 collection + scoped user + password in `mccarthy-kv-553468f1`).
+
+**Solr names are decided (2026-09-14).** In lib-main three different things
+carry the word "mainsite", so they are easy to mix up:
+
+| Thing | Where it lives | lib-main | mccarthy |
+|---|---|---|---|
+| SolrCloud cluster | asimov, namespace `solr-mainsite` | `solr-mainsite` | the same cluster, shared |
+| Drupal server machine name | `config/search_api.server.<id>.yml`; infra `drupal_search_server_id` | `solr_mainsite` | `solr_mccarthy` |
+| Collection (core), production | the shared SolrCloud | `mainsite_prod` | `mccarthy_prod` |
+| Collection (core), dev | the shared SolrCloud | `mainsite_dev` | `mccarthy_dev` |
+| Collection (core), DDEV | the laptop's DDEV Solr | `mainsite_local` | `mccarthy_local` |
+
+The machine name is Drupal-only; Solr never sees it. Infra uses it to find the
+server config and write host, core and login at boot, so **a mismatch means the
+overrides land on nothing and prod/dev keep the committed DDEV host `solr`**,
+with no error. The prod and dev collection names matter to Solr: each Drupal
+login is scoped to one collection by exact name, and a wrong name gets HTTP 403.
+Reusing `solr_mainsite` here would also have worked — Drupal config is per site,
+and `upload-configset` appends a per-site hash to the configset name
+(`search_api_solr` 4.3.10, `src/Utility/Utility.php:162`) — so `solr_mccarthy`
+is a clarity choice, not a technical one.
+
+Checked live the same day: the cluster has **no collections at all yet**, not
+even lib-main's (ZooKeeper `/mainsite/collections` is `[]`, configsets
+`[_default]` only), and it runs **1** Solr replica. That is intended, not
+drift: `apps/base/solr-mainsite/solrcloud.yaml` says `replicas: 2`, but the
+production overlay `apps/production/solr-mainsite/kustomization.yaml` patches it
+to 1. The share-the-cluster decision's "2 replicas will carry both" was wrong
+about the count.
+
+**Gap in the shared rollout plan, found the same day — it blocks lib-main too.**
+ZooKeeper already holds `/mainsite/security.json` (created 2025-12-12, last
+changed 2026-06-01). asimov's `security-init-job.yaml` only rebuilds the
+*bootstrap* Secret, and its own comment says the operator uploads that
+"on first cluster bootstrap". So merging the asimov branch adds **no** Drupal
+users for either site. The same comment's rotation recipe — delete
+`/security.json` from ZooKeeper — leaves Solr without authentication until the
+operator re-uploads, and the public ingress `libsolr.lib.utk.edu` is live. The
+safer path is Solr's Authentication/Authorization API (`set-user`,
+`set-permission`) run as `admin`. Also: the Drupal logins are scoped to their
+collection, so they cannot create one; `upload-configset` for the first
+collection needs an admin-level login, once.
+
+Verified against the live cluster, not only the docs. The live `security.json`
+has exactly three users — `admin`, `k8s-oper`, `solr` — the operator's own
+defaults. The operator's `setup-zk` init container on
+`solr-mainsite-solrcloud-0` writes `security.json` only when the file is
+missing or `{}`. asimov's own `SECURITY.md` says the same: "After initial
+security.json creation, the operator never modifies it. Use Solr's Security API
+for changes." **A second break follows from it:** the branch also points the
+operator's `basicAuthSecret` at a new Terraform-generated `k8s-oper` password
+(`solr-mainsite-operator-auth`), while ZooKeeper still holds the hash of the
+operator-generated one — so after merge the operator's own Solr API calls would
+get 401. The design history explains how this happened: the approved plan used
+a `set-user` API ceremony, which works on a running cluster; the implementation
+swapped it for the bootstrap Job, which only works on a new one
+(`lib-main-infra` `docs/drupal-solr-search-progress.md`, "Departure from the
+original plan"). Nothing about this is in the `lib-main` app repo.
+
+**Fix built 2026-09-14 on asimov `feat/drupal-solr-search`, uncommitted:** a
+CronJob in `apps/production/solr-mainsite/drupal-users/` that adds and repairs
+Drupal logins through the Security API, tested against a local Solr 9.10.1 with
+the live rule order. Full record in lib-main-infra
+`docs/drupal-solr-search-progress.md` (2026-09-14 section). **What it fixes
+for this repo:** the names are `drupal-mccarthy-prod` → `mccarthy_prod` and
+`drupal-mccarthy-dev` → `mccarthy_dev`, and asimov reads the passwords from
+`mccarthy-kv-553468f1` as **`production-solr-drupal-mccarthy-prod-password`**
+and **`dev-solr-drupal-mccarthy-password`** — Terraform here must create
+exactly those names (prod in `environments/production`, dev in
+`environments/devtest`) and grant the asimov ESO identity Key Vault Secrets
+User on the vault. Then uncomment `site-mccarthy.yaml` in asimov.
+
+**PR #25 (`solr-settings` → `dev`)** already uses `solr_mccarthy` and the
+`solr_cloud_basic_auth` connector, but sets the DDEV core to `mccarthy`, not
+`mccarthy_local`. Its index `records` is exported with `server: ''` and
+`status: false`, so merging it installs the modules on dev (and on production
+once promoted) but
+indexes nothing and contacts no Solr. **The day that index is attached and
+enabled on a branch bound for `dev`, the infra connector overrides must already
+exist here**, or every node save tries to reach host `solr` from the VM.
 
 **The one thing the devs will break silently.** `az_blob_fs` is installed,
 configured, and **has never executed a single read or write on this site** —
