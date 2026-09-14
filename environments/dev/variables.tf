@@ -152,3 +152,50 @@ variable "media_sas_expiry" {
   default     = "2028-01-01T00:00:00Z"
 }
 
+# --- Solr (shared SolrCloud on Asimov) -----------------------------------------
+# The dev VM sits in the production VNet's web subnet, so it inherits the
+# production stack's peering and search.utklib.internal zone: no networking
+# here. Dev gets its own collection and its own scoped login so it can never
+# write into the production index. The password is owned by environments/devtest.
+
+variable "solr_host" {
+  description = "Hostname Drupal uses to reach Solr (resolved by the production stack's search.utklib.internal zone)."
+  type        = string
+  default     = "solr.search.utklib.internal"
+}
+
+variable "solr_port" {
+  description = "Port Drupal uses to reach Solr."
+  type        = string
+  default     = "8983"
+}
+
+variable "solr_path" {
+  description = "Solr URL path prefix. '/' for a vanilla Solr 9 endpoint."
+  type        = string
+  default     = "/"
+}
+
+variable "solr_core" {
+  description = "Solr collection backing the dev index. Separate from production's."
+  type        = string
+  default     = "mccarthy_dev"
+}
+
+variable "solr_username" {
+  description = "Solr basic-auth login scoped to the dev collection."
+  type        = string
+  default     = "drupal-mccarthy-dev"
+}
+
+variable "solr_password_secret_name" {
+  description = "Key Vault secret holding the dev Solr connector password. Written by environments/devtest; read here as a data source so a missing secret fails the plan, not the boot."
+  type        = string
+  default     = "dev-solr-drupal-mccarthy-password"
+}
+
+variable "drupal_search_server_id" {
+  description = "Machine name of the search_api.server config entity the overrides target (config/search_api.server.<id>.yml in the app repo)."
+  type        = string
+  default     = "solr_mccarthy"
+}

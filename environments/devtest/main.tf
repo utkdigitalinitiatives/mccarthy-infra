@@ -28,6 +28,10 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.71"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.8"
+    }
   }
 
   backend "azurerm" {}
@@ -78,6 +82,28 @@ data "azurerm_key_vault_secret" "db_admin_password" {
 resource "azurerm_key_vault_secret" "storage_account_key" {
   name         = "devtest-storage-account-key"
   value        = module.blob_storage.primary_access_key
+  key_vault_id = data.terraform_remote_state.secrets.outputs.key_vault_id
+  content_type = "text/plain"
+}
+
+# Dev site's Solr connector password (login drupal-mccarthy-dev, collection
+# mccarthy_dev on the shared SolrCloud). Owned HERE, not in environments/dev/:
+# that stack is destroyed on every main merge, and a password owned there would
+# regenerate each deploy while Solr still held the old one -> 401 on every
+# index write. The dev VM reads this by name at boot; asimov's External Secrets
+# Operator mirrors it into the cluster to create the login. The secret NAME is
+# a contract with asimov's site-mccarthy.yaml. Must be applied before the next
+# dev deploy: environments/dev reads it as a data source and fails at plan time
+# if it is missing.
+resource "random_password" "solr_drupal_dev" {
+  length           = 32
+  special          = true
+  override_special = "!@#%^&*-_=+?"
+}
+
+resource "azurerm_key_vault_secret" "solr_drupal_dev_password" {
+  name         = "dev-solr-drupal-mccarthy-password"
+  value        = random_password.solr_drupal_dev.result
   key_vault_id = data.terraform_remote_state.secrets.outputs.key_vault_id
   content_type = "text/plain"
 }

@@ -320,3 +320,74 @@ variable "media_sas_expiry" {
   type        = string
   default     = "2028-01-01T00:00:00Z"
 }
+
+# --- Solr (shared SolrCloud on the Asimov AKS cluster) -------------------------
+#
+# Drupal reaches the solr-mainsite SolrCloud over VNet peering, through an
+# internal Azure load balancer pinned at solr_internal_lb_ip inside the AKS VNet
+# (asimov apps/production/solr-mainsite/internal-lb.yaml). This stack builds its
+# OWN private DNS zone search.utklib.internal, linked only to this VNet, with an
+# A record solr -> that IP. Every site uses the same zone name and the same IP,
+# and none of them share a zone resource -- linking this VNet to lib-main's zone
+# would make this site's search depend on lib-main's Terraform state.
+#
+# Three names that are easy to mix up:
+#   solr-mainsite        the SolrCloud cluster (Kubernetes), shared by every site
+#   solr_mccarthy        Drupal's search_api.server machine name, this site only
+#   mccarthy_prod        the collection on that cluster, this environment only
+# The connector login drupal-mccarthy-prod is scoped to mccarthy_prod by exact
+# name in Solr's security.json; a wrong collection name gets HTTP 403.
+
+variable "asimov_vnet_name" {
+  description = "Name of the Asimov AKS node VNet to peer with."
+  type        = string
+  default     = "aks-vnet-36013409"
+}
+
+variable "asimov_vnet_resource_group" {
+  description = "Resource group containing the Asimov AKS node VNet (the AKS-managed MC_ group)."
+  type        = string
+  default     = "MC_rg-asimov_Asimov_eastus2"
+}
+
+variable "solr_internal_lb_ip" {
+  description = "Private IP of Solr's internal Azure load balancer inside the Asimov AKS VNet. Must match the annotation in asimov's internal-lb.yaml."
+  type        = string
+  default     = "10.224.255.10"
+}
+
+variable "solr_host" {
+  description = "Hostname Drupal uses to reach Solr. Resolved by this stack's search.utklib.internal private DNS zone to solr_internal_lb_ip."
+  type        = string
+  default     = "solr.search.utklib.internal"
+}
+
+variable "solr_port" {
+  description = "Port Drupal uses to reach Solr."
+  type        = string
+  default     = "8983"
+}
+
+variable "solr_path" {
+  description = "Solr URL path prefix for the search_api_solr connector. '/' for a vanilla Solr 9 endpoint; the connector appends solr/<core> itself, so '/solr' would double it and 404."
+  type        = string
+  default     = "/"
+}
+
+variable "solr_core" {
+  description = "Solr collection backing the production index."
+  type        = string
+  default     = "mccarthy_prod"
+}
+
+variable "solr_username" {
+  description = "Solr basic-auth login scoped to the production collection."
+  type        = string
+  default     = "drupal-mccarthy-prod"
+}
+
+variable "drupal_search_server_id" {
+  description = "Machine name of the search_api.server config entity in the app repo (config/search_api.server.<id>.yml). The environment.php overrides target this ID; a mismatch means they land on nothing and Drupal keeps the committed DDEV host, with no error."
+  type        = string
+  default     = "solr_mccarthy"
+}

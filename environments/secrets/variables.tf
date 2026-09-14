@@ -33,3 +33,22 @@ variable "operator_object_ids" {
   type        = list(string)
   default     = []
 }
+
+variable "asimov_eso_principal_id" {
+  description = <<-EOT
+    Object ID (principalId, NOT clientId) of the Asimov AKS cluster's External
+    Secrets Operator managed identity. Given Key Vault Secrets User on the
+    shared vault so ESO can mirror this site's Solr connector passwords into
+    the cluster, where a CronJob creates the matching Solr logins.
+
+    Lives in this manually-applied stack on purpose: the production stack is
+    applied by CI on every main merge, and a required variable there that no
+    workflow passes fails the deploy (lib-main-infra PR #15, reverted the same
+    day). Look it up with:
+      az identity show --resource-group rg-asimov --name id-asimov-eso \
+        --query principalId -o tsv
+    Set null to withhold the role.
+  EOT
+  type        = string
+  default     = "1c62fb68-bdf4-428e-875c-f1abd77a172e"
+}

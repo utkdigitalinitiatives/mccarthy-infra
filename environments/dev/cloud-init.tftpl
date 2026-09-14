@@ -70,6 +70,17 @@ write_files:
       // Default file scheme
       $settings['file_default_scheme'] = 'azblob';
 
+      // Search API Solr connector: point the committed server entity (which
+      // carries the developers' DDEV host/core/login) at the shared SolrCloud,
+      // dev collection. Password substituted at boot by /opt/fetch-secrets.sh.
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['scheme']   = 'http';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['host']     = '${solr_host}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['port']     = '${solr_port}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['path']     = '${solr_path}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['core']     = '${solr_core}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['username'] = '${solr_username}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['password'] = '__SOLR_PASSWORD__';
+
   # Secrets bootstrap: fetches Key Vault secrets via VM managed identity
   # and substitutes placeholders in environment.php.
   - path: /opt/fetch-secrets.sh
@@ -83,6 +94,7 @@ write_files:
       ENV_NAME="${env_name}"
       HASH_SALT_SECRET="${hash_salt_secret_name}"
       STORAGE_KEY_SECRET="${storage_key_secret_name}"
+      SOLR_PASSWORD_SECRET="${solr_password_secret_name}"
       ENV_PHP="/etc/drupal/environment.php"
       LOG_FILE="/var/log/cloud-init-output.log"
 
@@ -114,24 +126,26 @@ write_files:
       DB_PASSWORD=""
       HASH_SALT=""
       STORAGE_KEY=""
+      SOLR_PASSWORD=""
       for attempt in $(seq 1 18); do
         TOKEN=$(get_token || true)
         if [ -n "$TOKEN" ]; then
           DB_PASSWORD=$(fetch_secret "$ENV_NAME-db-admin-password" "$TOKEN" || true)
           HASH_SALT=$(fetch_secret "$HASH_SALT_SECRET" "$TOKEN" || true)
           STORAGE_KEY=$(fetch_secret "$STORAGE_KEY_SECRET" "$TOKEN" || true)
-          [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && break
+          SOLR_PASSWORD=$(fetch_secret "$SOLR_PASSWORD_SECRET" "$TOKEN" || true)
+          [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && [ -n "$SOLR_PASSWORD" ] && break
         fi
         log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
         sleep 10
       done
 
-      if [ -z "$DB_PASSWORD" ] || [ -z "$HASH_SALT" ] || [ -z "$STORAGE_KEY" ]; then
+      if [ -z "$DB_PASSWORD" ] || [ -z "$HASH_SALT" ] || [ -z "$STORAGE_KEY" ] || [ -z "$SOLR_PASSWORD" ]; then
         log "ERROR: could not fetch required secrets from $KV_NAME"
         exit 1
       fi
 
-      DB_PASSWORD="$DB_PASSWORD" HASH_SALT="$HASH_SALT" STORAGE_KEY="$STORAGE_KEY" \
+      DB_PASSWORD="$DB_PASSWORD" HASH_SALT="$HASH_SALT" STORAGE_KEY="$STORAGE_KEY" SOLR_PASSWORD="$SOLR_PASSWORD" \
         python3 - "$ENV_PHP" <<'PYEOF'
       import os, sys
       path = sys.argv[1]
@@ -140,6 +154,7 @@ write_files:
       content = content.replace('__DB_PASSWORD__', os.environ['DB_PASSWORD'])
       content = content.replace('__HASH_SALT__', os.environ['HASH_SALT'])
       content = content.replace('__STORAGE_KEY__', os.environ['STORAGE_KEY'])
+      content = content.replace('__SOLR_PASSWORD__', os.environ['SOLR_PASSWORD'])
       with open(path, 'w') as f:
           f.write(content)
       PYEOF
@@ -333,6 +348,21 @@ runcmd:
     fi
     echo "Rebuilding caches..." >> /var/log/cloud-init-output.log
     sudo -u drupal $DRUSH cache:rebuild >> /var/log/cloud-init-output.log 2>&1
+    # Solr reindex. The dev DB was just synced from production, so search_api's
+    # tracking tables say every item is already indexed -- into production's
+    # collection. The dev collection (${solr_core}) is separate, so clear it,
+    # reset the tracker, and reindex. Every step is best-effort: while the index
+    # is disabled or has no server these commands do nothing or complain, and
+    # neither may fail the boot. Guarded on search_api being enabled so an image
+    # without it does not error here.
+    if sudo -u drupal $DRUSH search-api:status >/dev/null 2>&1; then
+      echo "Reindexing Solr (${solr_core})..." >> /var/log/cloud-init-output.log
+      sudo -u drupal $DRUSH search-api:clear >> /var/log/cloud-init-output.log 2>&1 || true
+      sudo -u drupal $DRUSH search-api:rebuild-tracker >> /var/log/cloud-init-output.log 2>&1 || true
+      sudo -u drupal $DRUSH search-api:index >> /var/log/cloud-init-output.log 2>&1 || true
+    else
+      echo "search_api not enabled; skipping Solr reindex" >> /var/log/cloud-init-output.log
+    fi
     echo "Drupal update complete" >> /var/log/cloud-init-output.log
 
   # Restart web services after configuration

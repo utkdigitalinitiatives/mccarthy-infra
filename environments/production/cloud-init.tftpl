@@ -74,6 +74,17 @@ write_files:
       // Default file scheme
       $settings['file_default_scheme'] = 'azblob';
 
+      // Search API Solr connector: point the committed server entity (which
+      // carries the developers' DDEV host/core/login) at the shared SolrCloud.
+      // Password substituted at boot by /opt/fetch-secrets.sh (Key Vault).
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['scheme']   = 'http';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['host']     = '${solr_host}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['port']     = '${solr_port}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['path']     = '${solr_path}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['core']     = '${solr_core}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['username'] = '${solr_username}';
+      $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['password'] = '__SOLR_PASSWORD__';
+
       // Reverse proxy settings for Azure Load Balancer
       $settings['reverse_proxy'] = TRUE;
       $settings['reverse_proxy_addresses'] = ['127.0.0.1', '168.63.129.16'];
@@ -98,6 +109,7 @@ write_files:
       HASH_SALT_SECRET="${hash_salt_secret_name}"
       STORAGE_KEY_SECRET="${storage_key_secret_name}"
       PRIVATE_STORAGE_KEY_SECRET="${private_files_key_secret_name}"
+      SOLR_PASSWORD_SECRET="${solr_password_secret_name}"
       ENV_PHP="/etc/drupal/environment.php"
       SECRETS_ENV="/etc/drupal/secrets.env"
       LOG_FILE="/var/log/drupal-init.log"
@@ -131,6 +143,7 @@ write_files:
       HASH_SALT=""
       STORAGE_KEY=""
       PRIVATE_STORAGE_KEY=""
+      SOLR_PASSWORD=""
       for attempt in $(seq 1 18); do
         TOKEN=$(get_token || true)
         if [ -n "$TOKEN" ]; then
@@ -140,20 +153,23 @@ write_files:
           # Best-effort: the private-files mount is non-fatal by design, so this
           # secret is deliberately NOT part of the required set gating the loop.
           PRIVATE_STORAGE_KEY=$(fetch_secret "$PRIVATE_STORAGE_KEY_SECRET" "$TOKEN" || true)
-          [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && break
+          # Required: Terraform writes this secret in the same apply that ships
+          # this template, so a miss here is RBAC lag, not a missing secret.
+          SOLR_PASSWORD=$(fetch_secret "$SOLR_PASSWORD_SECRET" "$TOKEN" || true)
+          [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && [ -n "$SOLR_PASSWORD" ] && break
         fi
         log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
         sleep 10
       done
 
-      if [ -z "$DB_PASSWORD" ] || [ -z "$HASH_SALT" ] || [ -z "$STORAGE_KEY" ]; then
+      if [ -z "$DB_PASSWORD" ] || [ -z "$HASH_SALT" ] || [ -z "$STORAGE_KEY" ] || [ -z "$SOLR_PASSWORD" ]; then
         log "ERROR: could not fetch required secrets from $KV_NAME"
         exit 1
       fi
 
       # Substitute placeholders in environment.php. Use python rather than sed
       # so '/' '&' '|' in values don't need escaping.
-      DB_PASSWORD="$DB_PASSWORD" HASH_SALT="$HASH_SALT" STORAGE_KEY="$STORAGE_KEY" \
+      DB_PASSWORD="$DB_PASSWORD" HASH_SALT="$HASH_SALT" STORAGE_KEY="$STORAGE_KEY" SOLR_PASSWORD="$SOLR_PASSWORD" \
         python3 - "$ENV_PHP" <<'PYEOF'
       import os, sys
       path = sys.argv[1]
@@ -162,6 +178,7 @@ write_files:
       content = content.replace('__DB_PASSWORD__', os.environ['DB_PASSWORD'])
       content = content.replace('__HASH_SALT__', os.environ['HASH_SALT'])
       content = content.replace('__STORAGE_KEY__', os.environ['STORAGE_KEY'])
+      content = content.replace('__SOLR_PASSWORD__', os.environ['SOLR_PASSWORD'])
       with open(path, 'w') as f:
           f.write(content)
       PYEOF

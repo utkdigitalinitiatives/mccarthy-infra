@@ -111,3 +111,15 @@ resource "azurerm_role_assignment" "operator_secrets_officer" {
   role_definition_name = "Key Vault Secrets Officer"
   principal_id         = each.value
 }
+
+# Asimov's External Secrets Operator: read-only, so it can mirror this site's
+# Solr connector passwords (written by environments/production and
+# environments/devtest) into the solr-mainsite namespace. Vault-wide rather than
+# per-secret: the vault holds nothing ESO should not see, and per-secret scoping
+# would need a new role for every rotation or added environment.
+resource "azurerm_role_assignment" "asimov_eso_secrets_user" {
+  count                = var.asimov_eso_principal_id == null ? 0 : 1
+  scope                = azurerm_key_vault.shared.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = var.asimov_eso_principal_id
+}

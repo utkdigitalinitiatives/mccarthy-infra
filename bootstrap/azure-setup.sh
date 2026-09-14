@@ -45,6 +45,14 @@ INFRA_REPO="${INFRA_REPO:-${PROJECT_NAME}-infra}"
 
 # Shared with lib-main-infra. This script only ADDS an image definition here.
 SHARED_GALLERY_RG="${SHARED_GALLERY_RG:-lib-main-images-rg}"
+
+# The Asimov AKS node VNet that hosts SolrCloud. environments/production peers
+# to it (both directions) so the VMSS can reach Solr's internal load balancer.
+# The reverse peering is a child of THIS VNet, in the AKS-managed resource
+# group, so the service principal needs rights there or every production
+# plan fails on refresh. Scoped to the one VNet, not the resource group.
+ASIMOV_VNET_RG="${ASIMOV_VNET_RG:-MC_rg-asimov_Asimov_eastus2}"
+ASIMOV_VNET_NAME="${ASIMOV_VNET_NAME:-aks-vnet-36013409}"
 SHARED_GALLERY_NAME="${SHARED_GALLERY_NAME:-lib_main_gallery}"
 BASE_IMAGE_DEF="${BASE_IMAGE_DEF:-drupal-base-rocky-linux-9}"
 APP_IMAGE_DEF="${APP_IMAGE_DEF:-${PROJECT_NAME}-rocky-linux-9}"
@@ -290,6 +298,15 @@ assign_role "Contributor" "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$SHARE
 # environments/secrets creates role assignments on the Key Vault; Contributor
 # alone cannot write role assignments.
 assign_role "Role Based Access Control Administrator" "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$SECRETS_RG"
+
+# Solr: environments/production creates the aks-to-<project> half of the VNet
+# peering inside the Asimov AKS VNet and reads that VNet as a data source.
+# Network Contributor on the VNet resource covers both (peer/action + write on
+# virtualNetworkPeerings) without granting anything else in the AKS-managed
+# resource group. Missing this, `terraform plan` in CI fails with
+# AuthorizationFailed on refresh -- on every production deploy.
+assign_role "Network Contributor" \
+  "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$ASIMOV_VNET_RG/providers/Microsoft.Network/virtualNetworks/$ASIMOV_VNET_NAME"
 
 # Required because every `terraform init` passes use_azuread_auth=true.
 # MUST exist before shared key access is disabled (see the note below).

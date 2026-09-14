@@ -63,3 +63,17 @@ admin_ssh_public_key = "REPLACE_WITH_SSH_PUBLIC_KEY"
 # Two-pass deployment: leave false for the very first apply (the VMSS does not
 # exist yet, so there is no principal to grant), then set true and re-apply.
 enable_vmss_blob_access = false
+
+# --- Solr (shared SolrCloud on Asimov) -----------------------------------------
+# Defaults in variables.tf are the live values; nothing here is required.
+# The asimov ESO identity's Key Vault grant lives in environments/secrets, not
+# here, so CI never needs a variable for it.
+#
+# Before the first apply, confirm the internal LB IP is still free:
+#   az network nic list -g MC_rg-asimov_Asimov_eastus2 \
+#     --query "[].ipConfigurations[].privateIPAddress" -o tsv \
+#     | grep -F 10.224.255.10 || echo free
+#
+# solr_internal_lb_ip        = "10.224.255.10"
+# asimov_vnet_name           = "aks-vnet-36013409"
+# asimov_vnet_resource_group = "MC_rg-asimov_Asimov_eastus2"

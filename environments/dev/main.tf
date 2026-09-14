@@ -88,6 +88,15 @@ data "azurerm_key_vault_secret" "devtest_storage_key" {
   key_vault_id = data.terraform_remote_state.secrets.outputs.key_vault_id
 }
 
+# Dev Solr connector password, also provisioned by environments/devtest/. Only
+# the NAME is used below (the VM fetches the value itself at boot); reading it
+# here makes a devtest stack that has not been applied a plan-time error
+# instead of a VM that boots, fails fetch-secrets.sh, and serves nothing.
+data "azurerm_key_vault_secret" "solr_password" {
+  name         = var.solr_password_secret_name
+  key_vault_id = data.terraform_remote_state.secrets.outputs.key_vault_id
+}
+
 # Data source: Get image version from Azure Compute Gallery
 data "azurerm_shared_image_version" "drupal" {
   name                = var.image_version
@@ -188,6 +197,14 @@ module "dev_vm" {
     # The escaped \% becomes a literal % in the substitution; combined with [NE] flag
     # in the RewriteRule and proxy-nocanon env, the SAS reaches Azure verbatim.
     storage_sas_token = replace(data.azurerm_storage_account_sas.media_read.sas, "%", "\\%")
+    # Solr connector overrides for search_api.server.<drupal_search_server_id>
+    solr_host                 = var.solr_host
+    solr_port                 = var.solr_port
+    solr_path                 = var.solr_path
+    solr_core                 = var.solr_core
+    solr_username             = var.solr_username
+    solr_password_secret_name = data.azurerm_key_vault_secret.solr_password.name
+    drupal_search_server_id   = var.drupal_search_server_id
   })
 
   tags = {

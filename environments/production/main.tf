@@ -137,6 +137,27 @@ resource "azurerm_key_vault_secret" "storage_account_key" {
   content_type = "text/plain"
 }
 
+# Solr connector password for the production collection. Terraform is the only
+# writer. Two readers: the VMSS fetches it at boot (fetch-secrets.sh), and
+# asimov's External Secrets Operator mirrors it into the cluster, where a
+# CronJob creates the drupal-mccarthy-prod login through Solr's Security API.
+# The secret NAME is a contract with asimov
+# (apps/production/solr-mainsite/drupal-users/site-mccarthy.yaml) -- renaming it
+# here breaks that side silently. Restricted special set: the value travels
+# through PHP single quotes and a JSON body.
+resource "random_password" "solr_drupal_prod" {
+  length           = 32
+  special          = true
+  override_special = "!@#%^&*-_=+?"
+}
+
+resource "azurerm_key_vault_secret" "solr_drupal_prod_password" {
+  name         = "production-solr-drupal-mccarthy-prod-password"
+  value        = random_password.solr_drupal_prod.result
+  key_vault_id = data.terraform_remote_state.secrets.outputs.key_vault_id
+  content_type = "text/plain"
+}
+
 # Data source: Get image version from Azure Compute Gallery
 data "azurerm_shared_image_version" "drupal" {
   count               = var.use_gallery_image ? 1 : 0
@@ -199,6 +220,78 @@ module "networking" {
   allowed_ssh_cidr_blocks                 = var.allowed_ssh_cidr_blocks
 
   tags = local.common_tags
+}
+
+# ------------------------------------------------------------------------------
+# Solr network path: VNet peering to Asimov + private DNS
+# ------------------------------------------------------------------------------
+# The VMSS reaches the shared SolrCloud over bidirectional peering with the
+# Asimov AKS node VNet (same subscription, so no aliased provider). Peering is
+# non-transitive: this site reaches Solr, and no other spoke reaches this site.
+# The dev VM sits in this VNet's web subnet, so it inherits both the peering
+# and the DNS zone -- environments/dev adds no networking.
+#
+# The reverse peering is created INSIDE the AKS VNet, in the AKS-managed
+# resource group. The CI service principal holds Network Contributor on that
+# one VNet (bootstrap/azure-setup.sh) so refresh and apply work in CI.
+#
+# Address-space discipline is in variables.tf > Networking. The AKS service
+# CIDR 10.0.0.0/16 is the one Azure does NOT validate at peering time.
+data "azurerm_virtual_network" "asimov" {
+  name                = var.asimov_vnet_name
+  resource_group_name = var.asimov_vnet_resource_group
+}
+
+resource "azurerm_virtual_network_peering" "drupal_to_aks" {
+  name                         = "${var.project_name}-to-aks"
+  resource_group_name          = data.azurerm_resource_group.production.name
+  virtual_network_name         = module.networking.vnet_name
+  remote_virtual_network_id    = data.azurerm_virtual_network.asimov.id
+  allow_virtual_network_access = true
+  allow_forwarded_traffic      = false
+  allow_gateway_transit        = false
+  use_remote_gateways          = false
+}
+
+resource "azurerm_virtual_network_peering" "aks_to_drupal" {
+  name                         = "aks-to-${var.project_name}"
+  resource_group_name          = var.asimov_vnet_resource_group
+  virtual_network_name         = var.asimov_vnet_name
+  remote_virtual_network_id    = module.networking.vnet_id
+  allow_virtual_network_access = true
+  allow_forwarded_traffic      = false
+  allow_gateway_transit        = false
+  use_remote_gateways          = false
+}
+
+# This site's OWN copy of the search.utklib.internal zone. Azure allows the
+# same private zone name in different resource groups as long as each zone
+# links to different VNets. Do not link this VNet to lib-main's zone instead:
+# a VNet link is a child of the zone, so it would live in lib-main's resource
+# group and state, and retiring lib-main would break this site's search --
+# the same coupling as the shared image gallery.
+resource "azurerm_private_dns_zone" "search_internal" {
+  name                = "search.utklib.internal"
+  resource_group_name = data.azurerm_resource_group.production.name
+  tags                = local.common_tags
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "drupal" {
+  name                  = "${var.project_name}-production-vnet-link"
+  resource_group_name   = data.azurerm_resource_group.production.name
+  private_dns_zone_name = azurerm_private_dns_zone.search_internal.name
+  virtual_network_id    = module.networking.vnet_id
+  registration_enabled  = false
+  tags                  = local.common_tags
+}
+
+resource "azurerm_private_dns_a_record" "solr" {
+  name                = "solr"
+  zone_name           = azurerm_private_dns_zone.search_internal.name
+  resource_group_name = data.azurerm_resource_group.production.name
+  ttl                 = 300
+  records             = [var.solr_internal_lb_ip]
+  tags                = local.common_tags
 }
 
 # Load Balancer: Public Standard LB
@@ -474,6 +567,14 @@ module "vmss" {
     drupal_site_uuid      = var.drupal_site_uuid
     domain_name           = var.domain_name
     enable_https          = var.enable_https
+    # Solr connector overrides for search_api.server.<drupal_search_server_id>
+    solr_host                 = var.solr_host
+    solr_port                 = var.solr_port
+    solr_path                 = var.solr_path
+    solr_core                 = var.solr_core
+    solr_username             = var.solr_username
+    solr_password_secret_name = azurerm_key_vault_secret.solr_drupal_prod_password.name
+    drupal_search_server_id   = var.drupal_search_server_id
   })
 
   tags = merge(local.common_tags, {
