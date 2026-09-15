@@ -8,7 +8,7 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — production on `0.0.17`, Solr started, as of 2026-09-14
+## Work in flight — production on `0.0.17`, Solr applied through step 6, as of 2026-09-15
 
 **2026-09-14: the devs turned on Search API + Solr, and it reached production.**
 `mccarthy-index` PR #25 (`solr-settings` → `dev`) built image `0.0.17`
@@ -95,7 +95,49 @@ are decided" further down this section.
 - Collections do not exist on the cluster (none do). The Drupal logins cannot
   create them; an admin runs `upload-configset` once each.
 
-**Apply order (nothing below has run):**
+**2026-09-15: steps 1–6 of the apply order below RAN and were verified.**
+Steps 7 and 8 remain. What happened, and what differed from the plan:
+
+- Step 1: the Network Contributor grant was made with a single
+  `az role assignment create` on `aks-vnet-36013409` (assignment
+  `e467bc2e-…`), not by re-running the bootstrap. Verified with
+  `az role assignment list` on that scope.
+- Steps 2–3: `secrets` applied 1, `devtest` applied 2, exactly as planned.
+- Step 4: `production` applied 7/5/0 exactly as planned. The reimage replaced
+  instance 9 with **instance 10**; `/user/login` 200 after. Both peerings
+  `Connected`. From the instance, `getent hosts solr.search.utklib.internal`
+  → `10.224.255.10`. All instance checks were run with
+  `az vmss run-command invoke … --instance-id 10 --command-id RunShellScript`.
+- Step 5: asimov PR #5 (`1c3aef3`) merged; Flux created
+  `solr-mainsite-internal-lb` on `10.224.255.10:8983`, ESO synced both
+  secrets, a manual CronJob run created both logins. **Verification trap:**
+  `/solr/admin/info/system` answers 200 with *no* credentials (operator
+  `probesRequireAuth: false`, it is the LB health probe), so it proves
+  nothing about a login. Use `/solr/admin/collections?action=LIST`: from the
+  VM it gave no-auth 401, wrong password 401, `drupal-mccarthy-prod` 403 —
+  403 is correct, the site logins are scoped to their own collection.
+- Step 6, two failures before it worked, both worth knowing:
+  - The configset was generated **on the production VM** with
+    `sudo -u drupal drush search-api-solr:get-server-config solr_mccarthy
+    /tmp/x.zip` (search_api_solr 4.4.0 against Solr 9.10.1) and uploaded
+    from there as `admin` — the Drupal logins cannot create collections.
+    Configset upload is `POST /solr/admin/configs?action=UPLOAD&name=…`;
+    `PUT` returns 400 "Unsupported method".
+  - CREATE then failed with "Underlying core creation failed": the Drupal
+    schema uses `solr.ICUCollationField`, which lives in Solr's
+    `analysis-extras` module, and the pod did not load it. Fixed
+    cluster-side in asimov PR #6 (`6ab211c`): `solrModules:
+    [analysis-extras]` on the SolrCloud CR; the operator adds it through
+    `solr.xml` sharedLib, one pod restart. **This would have blocked lib-main
+    identically.**
+  - Result: `mccarthy_prod` and `mccarthy_dev` exist (1 shard, 1 replica,
+    each on its own configset of the same name); `drupal-mccarthy-prod`
+    gets 200 on `/solr/mccarthy_prod/select?q=*:*`.
+- Not done: nothing on `main` yet (step 7); the devs have not been told
+  (step 8). The dev VM has not been redeployed since the `devtest` apply, so
+  the dev-side overrides and the guarded reindex are still unexercised.
+
+**Apply order (steps 1–6 ran 2026-09-15, see above; 7–8 remain):**
 1. PIM Owner. Grant the SP Network Contributor on the AKS VNet — either re-run
    `bootstrap/azure-setup.sh` (idempotent) or the single `az role assignment
    create` it contains.
