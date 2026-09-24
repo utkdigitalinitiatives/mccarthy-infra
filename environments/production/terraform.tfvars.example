@@ -49,11 +49,13 @@ drupal_site_uuid = "REPLACE_WITH_UUID_FROM_APP_REPO"
 #   mccarthy-index: minimal   |   lib-main: standard
 drupal_install_profile = "minimal"
 
-domain_name  = "REPLACE_WITH_FQDN" # e.g. mccarthy.lib.utk.edu
+domain_name  = "REPLACE_WITH_FQDN" # production: cormacmccarthy.lib.utk.edu
 enable_https = true
 
 # Resource ID of an externally-managed public IP for the load balancer.
 # Leave null to have Terraform create one and use lb_dns_label instead.
+# Production uses the hand-made, locked mccarthy-production-pip (20.72.74.161):
+#   /subscriptions/9fc717ef-b8c4-4858-a677-7c7b518616a0/resourceGroups/mccarthy-production-rg/providers/Microsoft.Network/publicIPAddresses/mccarthy-production-pip
 public_ip_id = null
 lb_dns_label = "mccarthy"
 

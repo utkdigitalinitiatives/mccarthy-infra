@@ -8,7 +8,128 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — production on `0.0.17`, Solr applied through step 6, as of 2026-09-15
+## Work in flight — production on `0.0.17`, domain cutover and bot protection queued, as of 2026-09-23
+
+**2026-09-24: production domain cutover — DONE, verified.** Production is
+moving off `libtest1` (`dns-test-rg`, 132.196.154.18, `libtest1.lib.utk.edu`),
+which is a reserve name for dev work, onto its own address and
+`cormacmccarthy.lib.utk.edu`.
+
+- Done: `mccarthy-production-pip` created by hand in `mccarthy-production-rg`
+  — `20.72.74.161`, Standard, Static, IPv4, zones 1 2 3 (same as `libtest1`),
+  with a `CanNotDelete` lock `do-not-delete` on the IP. Not attached yet.
+- Requested: OIT A record `cormacmccarthy.lib.utk.edu → 20.72.74.161`.
+  Submitted 2026-09-23 (the user confirmed it that evening).
+- Decided: the IP stays **out of Terraform state**. OIT's record points at it,
+  so it must outlive stack rebuilds, and some attribute changes would force a
+  replacement and a new address. The RG is a `data` source, so a destroy
+  cannot take it. Not named `mccarthy-production-lb-pip`: the load-balancer
+  module uses that name when `public_ip_id = null`. No role grant needed — the
+  CI SP already has Contributor on `mccarthy-production-rg`.
+- 2026-09-24: **DNS is live** — `dig +short cormacmccarthy.lib.utk.edu`
+  returns `20.72.74.161`. `public_ip_id` and `domain_name` are set in
+  `environments/production/terraform.tfvars` (untracked) and the `.example`
+  comments name the real values; the `PUBLIC_IP_ID` and `DOMAIN_NAME` repo
+  variables are set to the same strings and were compared byte-for-byte.
+- 2026-09-24 ~12:30 UTC: applied locally from a saved plan pinned to
+  `image_version=0.0.20` (what production already ran; the gallery's newest).
+  Plan was 0 add / 7 change / 0 destroy: the LB frontend IP swap, the VMSS
+  `custom_data` (only the four `domain_name` lines in cloud-init changed), and
+  five no-op "updates" with zero changed attributes (three `random_password`s
+  and both storage accounts — provider re-saves, values verified unchanged;
+  the admin password in state still hashes equal to the Key Vault value).
+- **No separate reimage was needed.** The VMSS upgrade policy is `Rolling`,
+  so the apply replaced the instance itself (instance 13, created 12:29 UTC,
+  `latestModelApplied=true`). That is why the VMSS step took 5m21s.
+- Verified: LB frontend = `mccarthy-production-pip`; `/health` 200 on both
+  ports via 20.72.74.161; homepage 200 via the name; port 80 301s to https;
+  Let's Encrypt cert `CN=cormacmccarthy.lib.utk.edu` (expires 2026-12-23);
+  `cloud-init status: done`, `drupal-init.log` ends "TLS setup complete";
+  old IP 132.196.154.18 no longer answers.
+- `libtest1` (`dns-test-rg`) is now free for dev use again.
+- Open: add the `az network public-ip create` + `az lock create` commands to
+  `bootstrap/azure-setup.sh` and the runbook's "externally-managed public IP"
+  section, which still describes only `libtest1`.
+
+**2026-09-23: bot protection — Anubis PLANNED, nothing written, one decision
+open.** Prompted by AI-scraper load concerns. Options weighed and where they
+landed:
+
+- **Azure Front Door Premium** — the Azure equivalent (Bot Manager rule set,
+  JavaScript Challenge GA, CAPTCHA preview, one profile fronts every site).
+  Rejected for now on cost: ~$330/month per profile before request/GB fees,
+  and it needs OIT to CNAME the name to the Front Door endpoint plus a TXT
+  record, and TLS moves to the edge. Front Door Standard ($35) has custom
+  rules only — no bot manager, no JS challenge. Application Gateway WAF v2
+  costs about the same as Premium, is per-region/per-VNet, and its JS
+  challenge is still preview. Revisit if a second site wants protection.
+- **Drupal modules** (drupal.org "block bad bots and crawlers" page: Crawler
+  Rate Limit, Facet Bot Blocker, Facets Protection, Bot Blocker, Antibot/
+  Honeypot) — app-repo work, no infra change, but PHP still boots per
+  request, so they cap damage rather than remove load. Facet Bot Blocker is
+  still worth asking the devs for if the site grows facets.
+- **Anubis on the VM — CHOSEN.** Free, no DNS/TLS/NSG change, and the work
+  carries to AKS as an ingress hop if that migration ever happens.
+
+**Design (nothing of this exists yet):** Apache `:443` keeps TLS, `/health`
+and the `/drupal-media/` blob proxy, and `ProxyPass`es everything else to
+Anubis on `127.0.0.1:8923` (`ProxyPreserveHost On`, `X-Real-IP`,
+`X-Forwarded-Proto https`). Anubis targets a new loopback-only vhost
+`127.0.0.1:3001` (`/etc/httpd/conf.d/drupal-backend.conf`) that holds the
+Drupal `DocumentRoot`/php-fpm block moved out of the 443 vhost, with
+`RemoteIPHeader X-Real-IP` + `RemoteIPTrustedProxy 127.0.0.1/32`. The port-80
+redirect vhost is untouched. Drupal already trusts `127.0.0.1` as a proxy
+and honours `X-Forwarded-Proto`, so no `environment.php` change. Both
+`cloud-init.tftpl` files change the same way (dev's self-signed vhost is the
+same shape as production's).
+
+- **Signing key must be shared.** Production runs 1–2 instances and rolling
+  updates run two at once, so a per-instance key would re-challenge users on
+  every hop. Plan: `random_bytes` (32) in each env's `main.tf` → Key Vault
+  secret → `fetch-secrets.sh` writes it as `ED25519_PRIVATE_KEY_HEX` into
+  `/etc/anubis/drupal.env` (root:anubis 0640). Never in the repo or tfvars.
+- **Env file** (`/etc/anubis/drupal.env`): `BIND=127.0.0.1:8923`,
+  `TARGET=http://127.0.0.1:3001`, `METRICS_BIND=127.0.0.1:9090`,
+  `POLICY_FNAME=/etc/anubis/drupal.botPolicies.yaml`, `DIFFICULTY=4`,
+  `COOKIE_DOMAIN=<domain_name>`, `WEBMASTER_EMAIL`. Unit is
+  `anubis@drupal.service` (the RPM ships `anubis@.service`, env from
+  `/etc/anubis/%i.env`).
+- **Policy file** imports the defaults (`(data)/bots/_deny-pathological.yaml`,
+  `(data)/crawlers/_allow-good.yaml`, `(data)/common/keep-internet-working.yaml`)
+  and adds `ALLOW` `path_regex` rules for `^/health$`, `^/\.well-known/`,
+  `^/drupal-media/`, `^/robots\.txt$`, sitemap paths. Known good crawlers
+  (Googlebot, Bingbot) pass by default — by UA *and* source IP.
+- **Binary**: RPM from the GitHub release, latest `v1.27.0` →
+  `anubis-1.27.0-1.x86_64.rpm`, SHA256-checked, version pinned as a Packer
+  var, installed in `packer/ansible/playbook.yml`. SELinux: set
+  `httpd_can_network_connect` on idempotently (the `[P]` blob proxy implies it
+  already is, but do not rely on the base image).
+- **Safety rule, non-negotiable:** cloud-init checks `command -v anubis` and
+  writes the *old* direct vhost when it is missing. The cloud-init change
+  lands via `main` merge (which redeploys production — see the comment-only
+  merge trap under Open) while the binary lands via the next app-image build;
+  the two cannot be made to arrive together, so the boot path must tolerate
+  either order.
+- **Rollout:** (1) merge Packer + cloud-init to `main`; production redeploys
+  on the fallback path, nothing changes for users; (2) get a dev image built
+  (an app-repo `dev` merge, or the `bootstrap_build` dispatch) — the Test
+  Cloud-Init workflow cannot test the image half; (3) verify on dev: bare
+  `curl` gets the challenge page, a browser passes, `/health` on `:80` is
+  200 from the LB, `/drupal-media/` serves, Drupal logs show real client
+  IPs; (4) the next dev→main promotion carries it to production.
+- **Known trade-off:** Anubis requires JavaScript. A no-script visitor sees
+  the challenge page and stops. Anubis has a `metarefresh` challenge
+  algorithm (weaker, no JS) if the library's accessibility review asks.
+- **Doc-fetching trap:** `anubis.techaro.lol` challenges non-browser fetchers,
+  so tooling gets its own "Access Denied" page. Read the docs raw from
+  `github.com/TecharoHQ/anubis` under `docs/docs/admin/` instead
+  (`native-install.mdx`, `environments/apache.mdx`, `installation.mdx`,
+  `policies.mdx`; defaults in `data/botPolicies.yaml`).
+- **Open decision (the user has not answered):** install the binary in this
+  repo's app image (recommended — ships on the next build, mccarthy only), or
+  in the shared base image in `lib-main-infra` (both sites, but a monthly
+  build in another repo, and lib-main would still need its own cloud-init
+  work). The card is already on the Vikunja board.
 
 **2026-09-14: the devs turned on Search API + Solr, and it reached production.**
 `mccarthy-index` PR #25 (`solr-settings` → `dev`) built image `0.0.17`
@@ -133,11 +254,25 @@ Steps 7 and 8 remain. What happened, and what differed from the plan:
   - Result: `mccarthy_prod` and `mccarthy_dev` exist (1 shard, 1 replica,
     each on its own configset of the same name); `drupal-mccarthy-prod`
     gets 200 on `/solr/mccarthy_prod/select?q=*:*`.
-- Not done: nothing on `main` yet (step 7); the devs have not been told
-  (step 8). The dev VM has not been redeployed since the `devtest` apply, so
-  the dev-side overrides and the guarded reindex are still unexercised.
+- Step 7 (2026-09-15, later): the branch fast-forwarded onto `main`
+  (`2fbd539`), pushed. Nothing triggers on push here, as expected.
+- Step 8 (same day): the devs were told. They answered with `mccarthy-index`
+  PR #27 (`enable-records-index` → `dev`): `records` gets `status: true`,
+  `server: solr_mccarthy`, and the server as a config dependency. Reviewed
+  here and approved. Note: the file was hand-edited, not `drush
+  config:export`ed — every quote flipped single→double. Harmless YAML, but
+  the next real export will flip them back and make a noisy diff. Merged;
+  `build-on-dispatch.yml` run `35012303533` (started 19:13Z) was **in
+  progress when the session ended**. That run is the first CI plan against
+  the new `dev` stack (the Key Vault password data source, the reindex
+  block) and the first time a dev VM boots with the Solr overrides.
+- **Still unverified:** that run's result; on the dev site, Search API
+  showing `solr_mccarthy` available and `records` with an item count > 0;
+  and production has not indexed anything (the index reaches production on
+  the next dev→main promotion; then run `search-api:index` on instance 10
+  by run-command, or let cron do it).
 
-**Apply order (steps 1–6 ran 2026-09-15, see above; 7–8 remain):**
+**Apply order (all eight steps ran 2026-09-15, see above; dev run result unverified):**
 1. PIM Owner. Grant the SP Network Contributor on the AKS VNet — either re-run
    `bootstrap/azure-setup.sh` (idempotent) or the single `az role assignment
    create` it contains.
