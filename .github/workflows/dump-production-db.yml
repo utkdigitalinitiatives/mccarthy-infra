@@ -318,18 +318,12 @@ jobs:
             echo "  --file $DUMP_FILE \\"
             echo "  --auth-mode login"
             echo ""
-            echo "ddev import-db --src=$DUMP_FILE"
-            echo "ddev drush cr"
+            echo "ddev refresh-local $DUMP_FILE"
             echo '```'
             echo ""
-            echo "### Then scrub it"
-            echo ""
-            echo "This dump holds real password hashes and real staff email addresses."
-            echo "Nothing in this workflow can remove them for you. On your laptop, run:"
-            echo ""
-            echo '```bash'
-            echo "ddev drush sql:sanitize"
-            echo '```'
+            echo "\`ddev refresh-local\` imports the dump, rewrites \`azblob://\` file URIs to"
+            echo "\`public://\`, pulls the media files, and scrubs the real password hashes and"
+            echo "staff email addresses. Plain \`ddev import-db\` does none of that, so do not use it."
             echo ""
             echo "\`az storage blob download\` failing with AuthorizationPermissionMismatch means"
             echo "you have not been granted Storage Blob Data Reader on the container yet."

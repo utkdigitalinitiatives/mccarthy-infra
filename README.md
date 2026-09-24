@@ -2,7 +2,7 @@
 
 Infrastructure as Code for the `mccarthy` Drupal site.
 
-**Status: live.** Production serves `https://libtest1.lib.utk.edu`. The running
+**Status: live.** Production serves `https://cormacmccarthy.lib.utk.edu`. The running
 image version is deliberately not named here — it changes on every promotion and
 a number in this file goes stale silently. Read it from the scale set instead:
 

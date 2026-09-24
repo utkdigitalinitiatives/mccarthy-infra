@@ -8,7 +8,7 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — production on `0.0.17`, domain cutover and bot protection queued, as of 2026-09-23
+## Work in flight — production on `0.0.20` at cormacmccarthy.lib.utk.edu, bot protection queued, as of 2026-09-24
 
 **2026-09-24: production domain cutover — DONE, verified.** Production is
 moving off `libtest1` (`dns-test-rg`, 132.196.154.18, `libtest1.lib.utk.edu`),
@@ -49,7 +49,21 @@ which is a reserve name for dev work, onto its own address and
 - `libtest1` (`dns-test-rg`) is now free for dev use again.
 - Open: add the `az network public-ip create` + `az lock create` commands to
   `bootstrap/azure-setup.sh` and the runbook's "externally-managed public IP"
-  section, which still describes only `libtest1`.
+  section (`docs/bootstrap-runbook.md` ~L185-210), which still describes only
+  `libtest1`; its status table (L23, L31) also still says "serving on
+  libtest1". README and developer-onboarding were fixed 2026-09-24.
+- Held off 2026-09-24 (user's call, revisit when version churn bites): a
+  `scripts/prod-image-version.sh` that prints the *running* VMSS image version
+  and the gallery's *newest*, to run before every local production plan. The
+  local plan needs `-var="image_version=..."`; pin the running version for a
+  config-only apply, the newest for a deploy. The `image_version_is_newest`
+  check already warns on a stale pin; what is missing is a one-command way to
+  read the running one (today: `az vmss show -g mccarthy-production-rg -n
+  mccarthy-production-vmss --query
+  virtualMachineProfile.storageProfile.imageReference.id -o tsv`).
+- Unexplained, low priority: SP `2ba4d943-ffaa-47c2-a172-dddc3ff82020` issued
+  "Start Virtual Machine Scale Set" on production at 11:37 UTC 2026-09-24.
+  Probably a start/stop automation; not investigated.
 
 **2026-09-23: bot protection — Anubis PLANNED, nothing written, one decision
 open.** Prompted by AI-scraper load concerns. Options weighed and where they
