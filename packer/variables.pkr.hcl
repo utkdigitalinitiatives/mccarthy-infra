@@ -141,3 +141,18 @@ variable "site_name" {
   type        = string
   default     = "mccarthy"
 }
+
+# Anubis bot-protection proxy. The RPM comes from the GitHub release and is
+# checked against this hash before install. To upgrade, change both together:
+# the hash is the "digest" GitHub shows for anubis-<version>-1.x86_64.rpm.
+variable "anubis_version" {
+  description = "Anubis release to install (no leading v)"
+  type        = string
+  default     = "1.27.0"
+}
+
+variable "anubis_rpm_sha256" {
+  description = "SHA256 of anubis-<anubis_version>-1.x86_64.rpm"
+  type        = string
+  default     = "d95db3c2e1c114cc604132bf5f4192d3ddd7622f35d4b4c006b5462cc0a13b8d"
+}

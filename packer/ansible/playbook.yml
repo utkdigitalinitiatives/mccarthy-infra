@@ -180,3 +180,69 @@
         owner: "{{ drupal_user }}"
         group: "{{ drupal_group }}"
         mode: "0644"
+
+    # ==========================================================================
+    # Anubis bot-protection proxy
+    # ==========================================================================
+    # Installed and configured here, but NOT enabled: /opt/anubis-setup.sh in
+    # cloud-init starts anubis@drupal at boot once the signing key is fetched
+    # from Key Vault, and it switches Apache onto Anubis only if Anubis answers.
+    # An image without these tasks still boots and serves Drupal directly.
+    - name: Download the Anubis RPM
+      ansible.builtin.get_url:
+        url: "https://github.com/TecharoHQ/anubis/releases/download/v{{ anubis_version }}/anubis-{{ anubis_version }}-1.x86_64.rpm"
+        dest: "/tmp/anubis-{{ anubis_version }}.rpm"
+        checksum: "sha256:{{ anubis_rpm_sha256 }}"
+        mode: "0644"
+
+    # The RPM is not GPG-signed (upstream publishes a detached .asc instead);
+    # the SHA256 check above is what pins it.
+    - name: Install Anubis
+      ansible.builtin.dnf:
+        name: "/tmp/anubis-{{ anubis_version }}.rpm"
+        state: present
+        disable_gpg_check: true
+
+    - name: Install the Drupal bot policy
+      ansible.builtin.copy:
+        src: files/anubis/drupal.botPolicies.yaml
+        dest: /etc/anubis/drupal.botPolicies.yaml
+        owner: root
+        group: root
+        mode: "0644"
+
+    # UT Power T in place of the Anubis mascot, as on digital.lib.utk.edu. The
+    # images are compiled into the binary, so Apache serves these files under
+    # the same URLs instead (see the Anubis block in the 443 vhost). One image
+    # for all three states: challenge running, passed, and denied.
+    - name: Create the Anubis challenge image directory
+      ansible.builtin.file:
+        path: /var/www/anubis/img
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the Power T as each Anubis challenge image
+      ansible.builtin.copy:
+        src: files/anubis/power-t.webp
+        dest: "/var/www/anubis/img/{{ item }}.webp"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - pensive
+        - happy
+        - reject
+
+    # Apache has to connect to Anubis on 127.0.0.1:8923. The /drupal-media/
+    # blob proxy already needs this boolean, but that is the base image's
+    # business; set it here so Anubis does not depend on it.
+    - name: Check whether httpd may open network connections
+      ansible.builtin.command: getsebool httpd_can_network_connect
+      register: httpd_network_bool
+      changed_when: false
+
+    - name: Allow httpd to open network connections
+      ansible.builtin.command: setsebool -P httpd_can_network_connect 1
+      when: "'--> on' not in httpd_network_bool.stdout"

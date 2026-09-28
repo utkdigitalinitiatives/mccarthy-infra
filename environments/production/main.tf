@@ -158,6 +158,22 @@ resource "azurerm_key_vault_secret" "solr_drupal_prod_password" {
   content_type = "text/plain"
 }
 
+# Anubis signing key (ED25519 seed, 32 bytes as 64 hex characters). Every
+# instance must sign with the same key: production runs up to two instances,
+# and a rolling upgrade runs two at once, so a per-instance key would send a
+# visitor back through the challenge each time the load balancer moved them.
+# The VMSS fetches it at boot (fetch-secrets.sh); nothing else reads it.
+resource "random_bytes" "anubis_signing_key" {
+  length = 32
+}
+
+resource "azurerm_key_vault_secret" "anubis_signing_key" {
+  name         = "production-anubis-signing-key"
+  value        = random_bytes.anubis_signing_key.hex
+  key_vault_id = data.terraform_remote_state.secrets.outputs.key_vault_id
+  content_type = "text/plain"
+}
+
 # Data source: Get image version from Azure Compute Gallery
 data "azurerm_shared_image_version" "drupal" {
   count               = var.use_gallery_image ? 1 : 0
@@ -578,6 +594,7 @@ module "vmss" {
     solr_core                 = var.solr_core
     solr_username             = var.solr_username
     solr_password_secret_name = azurerm_key_vault_secret.solr_drupal_prod_password.name
+    anubis_key_secret_name    = azurerm_key_vault_secret.anubis_signing_key.name
     drupal_search_server_id   = var.drupal_search_server_id
   })
 
