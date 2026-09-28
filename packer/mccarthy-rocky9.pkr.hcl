@@ -101,7 +101,9 @@ build {
       "--extra-vars", "php_version=${var.php_version}",
       "--extra-vars", "drupal_env=production",
       "--extra-vars", "drupal_repo=${var.drupal_repo}",
-      "--extra-vars", "drupal_ref=${var.drupal_ref}"
+      "--extra-vars", "drupal_ref=${var.drupal_ref}",
+      "--extra-vars", "anubis_version=${var.anubis_version}",
+      "--extra-vars", "anubis_rpm_sha256=${var.anubis_rpm_sha256}"
     ]
 
     ansible_env_vars = [

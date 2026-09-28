@@ -114,6 +114,11 @@ resource "azurerm_lb_rule" "https" {
   tcp_reset_enabled              = true
   idle_timeout_in_minutes        = var.idle_timeout_minutes
 
+  # Client-IP affinity. Anubis stores an issued challenge on the instance that
+  # issued it, so the answer has to come back to that instance; the default
+  # five-tuple hash can send each new connection elsewhere.
+  load_distribution = "SourceIP"
+
   disable_outbound_snat = true
 }
 

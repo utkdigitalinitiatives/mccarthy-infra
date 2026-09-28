@@ -110,6 +110,8 @@ write_files:
       STORAGE_KEY_SECRET="${storage_key_secret_name}"
       PRIVATE_STORAGE_KEY_SECRET="${private_files_key_secret_name}"
       SOLR_PASSWORD_SECRET="${solr_password_secret_name}"
+      ANUBIS_KEY_SECRET="${anubis_key_secret_name}"
+      ANUBIS_KEY_FILE="/etc/anubis/drupal.key"
       ENV_PHP="/etc/drupal/environment.php"
       SECRETS_ENV="/etc/drupal/secrets.env"
       LOG_FILE="/var/log/drupal-init.log"
@@ -144,6 +146,7 @@ write_files:
       STORAGE_KEY=""
       PRIVATE_STORAGE_KEY=""
       SOLR_PASSWORD=""
+      ANUBIS_KEY=""
       for attempt in $(seq 1 18); do
         TOKEN=$(get_token || true)
         if [ -n "$TOKEN" ]; then
@@ -156,6 +159,9 @@ write_files:
           # Required: Terraform writes this secret in the same apply that ships
           # this template, so a miss here is RBAC lag, not a missing secret.
           SOLR_PASSWORD=$(fetch_secret "$SOLR_PASSWORD_SECRET" "$TOKEN" || true)
+          # Best-effort: /opt/anubis-setup.sh serves Drupal without Anubis when
+          # this is missing, so it does not gate the loop either.
+          ANUBIS_KEY=$(fetch_secret "$ANUBIS_KEY_SECRET" "$TOKEN" || true)
           [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && [ -n "$SOLR_PASSWORD" ] && break
         fi
         log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
@@ -190,6 +196,14 @@ write_files:
       EOF
       chmod 640 "$SECRETS_ENV"
       chown root:drupal "$SECRETS_ENV"
+
+      # Anubis signing key, root-only: systemd reads it into anubis@drupal's
+      # environment. Kept out of secrets.env, which the drupal group can read.
+      rm -f "$ANUBIS_KEY_FILE"
+      if [ -n "$ANUBIS_KEY" ]; then
+        install -d -m 0755 "$(dirname "$ANUBIS_KEY_FILE")"
+        (umask 077 && printf '%s\n' "$ANUBIS_KEY" > "$ANUBIS_KEY_FILE")
+      fi
 
       # --- TEMPORARY: Pantheon migration source creds (OPTIONAL — must never block boot) ---
       # Only substitutes if the 'migrate-pantheon-db' secret exists in KV. A missing or
@@ -441,6 +455,113 @@ write_files:
         exit 0
       fi
 
+  # Loopback-only Drupal vhost that Anubis forwards to. Inert until
+  # /opt/anubis-setup.sh creates the marker, so an image without Anubis (or a
+  # failed Anubis start) leaves Apache exactly as it was. Port 8008 because
+  # SELinux already labels it http_port_t; an unlabeled port stops httpd.
+  - path: /etc/httpd/conf.d/drupal-backend.conf
+    permissions: '0644'
+    owner: root:root
+    content: |
+      <IfFile /etc/anubis/drupal.active>
+      Listen 127.0.0.1:8008
+      <VirtualHost 127.0.0.1:8008>
+          DocumentRoot /var/www/drupal/web
+
+          <Directory /var/www/drupal/web>
+              Options -Indexes +FollowSymLinks
+              AllowOverride All
+              Require all granted
+              RewriteEngine On
+              RewriteBase /
+              RewriteCond %%{REQUEST_FILENAME} !-f
+              RewriteCond %%{REQUEST_FILENAME} !-d
+              RewriteRule ^ index.php [L]
+          </Directory>
+
+          <FilesMatch \.php$>
+              SetHandler "proxy:unix:/run/php-fpm/drupal.sock|fcgi://localhost"
+          </FilesMatch>
+
+          # Every request here comes from Anubis, so log the client it saw.
+          LogFormat "%%{X-Real-Ip}i %l %u %t \"%r\" %>s %b \"%%{Referer}i\" \"%%{User-Agent}i\"" anubis_backend
+          ErrorLog /var/log/httpd/drupal-backend-error.log
+          CustomLog /var/log/httpd/drupal-backend-access.log anubis_backend
+      </VirtualHost>
+      </IfFile>
+
+  # Anubis bot protection. Never fails the boot: on any problem it removes the
+  # marker, and Apache serves Drupal directly as it did before Anubis existed.
+  # The binary and policy come from the app image; the signing key from Key
+  # Vault via /opt/fetch-secrets.sh, shared so a pass on one instance is
+  # honoured by the others.
+  - path: /opt/anubis-setup.sh
+    permissions: '0750'
+    owner: root:root
+    content: |
+      #!/bin/bash
+      set -uo pipefail
+
+      KEY_FILE="/etc/anubis/drupal.key"
+      ENV_FILE="/etc/anubis/drupal.env"
+      MARKER="/etc/anubis/drupal.active"
+      LOG_FILE="/var/log/drupal-init.log"
+
+      log() {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [anubis-setup] $1" | tee -a "$LOG_FILE"
+      }
+
+      fall_back() {
+        log "ERROR: $1; Apache serves Drupal directly, without bot protection"
+        rm -f "$MARKER"
+        systemctl disable --now anubis@drupal >/dev/null 2>&1 || true
+        systemctl restart httpd || true
+        exit 0
+      }
+
+      rm -f "$MARKER"
+
+      if ! command -v anubis >/dev/null 2>&1; then
+        log "Anubis is not in this image; Apache serves Drupal directly"
+        exit 0
+      fi
+      [ -s "$KEY_FILE" ] || fall_back "no Anubis signing key from Key Vault"
+
+      umask 077
+      cat > "$ENV_FILE" <<ENVEOF
+      BIND=127.0.0.1:8923
+      BIND_NETWORK=tcp
+      TARGET=http://127.0.0.1:8008
+      METRICS_BIND=127.0.0.1:8924
+      METRICS_BIND_NETWORK=tcp
+      POLICY_FNAME=/etc/anubis/drupal.botPolicies.yaml
+      DIFFICULTY=4
+      SERVE_ROBOTS_TXT=false
+      REDIRECT_DOMAINS=${join(",", compact([domain_name, lb_fqdn]))}
+      ED25519_PRIVATE_KEY_HEX=$(cat "$KEY_FILE")
+      ENVEOF
+
+      systemctl enable anubis@drupal >/dev/null 2>&1
+      systemctl restart anubis@drupal
+      for _ in $(seq 1 15); do
+        curl -sf -o /dev/null http://127.0.0.1:8924/metrics && break
+        sleep 2
+      done
+      curl -sf -o /dev/null http://127.0.0.1:8924/metrics || fall_back "anubis@drupal did not start"
+
+      touch "$MARKER"
+      if ! apachectl configtest >>"$LOG_FILE" 2>&1; then
+        fall_back "Apache config test rejected the Anubis vhosts"
+      fi
+      systemctl restart httpd || fall_back "httpd would not restart with the Anubis vhosts"
+
+      # End to end: Anubis -> backend vhost -> the static health file. curl
+      # does not claim to be a browser, so the policy lets it through.
+      CODE=$(curl -s -o /dev/null -w '%%{http_code}' -H 'X-Real-Ip: 127.0.0.1' http://127.0.0.1:8923/health)
+      [ "$CODE" = "200" ] || fall_back "request through Anubis to the backend vhost returned $CODE"
+
+      log "Anubis is in front of Drupal (127.0.0.1:8923 -> 127.0.0.1:8008)"
+
 %{ if enable_https && domain_name != null ~}
   # TLS setup script (Let's Encrypt with blob-backed cert persistence)
   - path: /opt/tls-setup.sh
@@ -562,20 +683,61 @@ write_files:
 
           DocumentRoot /var/www/drupal/web
 
-          <Directory /var/www/drupal/web>
-              Options -Indexes +FollowSymLinks
-              AllowOverride All
-              Require all granted
-              RewriteEngine On
-              RewriteBase /
-              RewriteCond %%{REQUEST_FILENAME} !-f
-              RewriteCond %%{REQUEST_FILENAME} !-d
-              RewriteRule ^ index.php [L]
-          </Directory>
+          # Without Anubis: serve Drupal from this vhost.
+          <IfFile !/etc/anubis/drupal.active>
+              <Directory /var/www/drupal/web>
+                  Options -Indexes +FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+                  RewriteEngine On
+                  RewriteBase /
+                  RewriteCond %%{REQUEST_FILENAME} !-f
+                  RewriteCond %%{REQUEST_FILENAME} !-d
+                  RewriteRule ^ index.php [L]
+              </Directory>
 
-          <FilesMatch \.php$>
-              SetHandler "proxy:unix:/run/php-fpm/drupal.sock|fcgi://localhost"
-          </FilesMatch>
+              <FilesMatch \.php$>
+                  SetHandler "proxy:unix:/run/php-fpm/drupal.sock|fcgi://localhost"
+              </FilesMatch>
+          </IfFile>
+
+          # With Anubis (/opt/anubis-setup.sh made the marker): everything but
+          # /health and /drupal-media/ goes through Anubis on 127.0.0.1:8923,
+          # which forwards what passes to drupal-backend.conf on 127.0.0.1:8008.
+          # Drupal trusts 127.0.0.1 as a proxy, so it takes the client IP,
+          # scheme, host and port from these headers. Client-sent copies are
+          # dropped first; mod_proxy then adds X-Forwarded-For/-Host itself.
+          <IfFile /etc/anubis/drupal.active>
+              RequestHeader unset X-Forwarded-For
+              RequestHeader unset X-Forwarded-Host
+              RequestHeader set X-Forwarded-Proto "https"
+              RequestHeader set X-Forwarded-Port "443"
+              RequestHeader set X-Real-Ip expr=%%{REMOTE_ADDR}
+              RequestHeader set X-Http-Version "%%{SERVER_PROTOCOL}s"
+
+              ProxyPass /health !
+              ProxyPass /drupal-media/ !
+
+              # UT Power T instead of the Anubis mascot on the challenge pages.
+              # The files come from the app image (packer/ansible/playbook.yml).
+              ProxyPass /.within.website/x/cmd/anubis/static/img/ !
+              Alias /.within.website/x/cmd/anubis/static/img/ /var/www/anubis/img/
+              <Directory /var/www/anubis/img>
+                  Require all granted
+              </Directory>
+
+              ProxyPass / http://127.0.0.1:8923/
+              ProxyPassReverse / http://127.0.0.1:8923/
+
+              # Anubis and Drupal need the real Host; the blob proxy below
+              # must NOT send it, or Azure Storage rejects the request.
+              <Location />
+                  ProxyPreserveHost On
+              </Location>
+              <Location /drupal-media/>
+                  ProxyPreserveHost Off
+              </Location>
+          </IfFile>
 
           <Location /health>
               SetHandler none
@@ -696,6 +858,10 @@ runcmd:
   # Configure TLS (Let's Encrypt)
   - /opt/tls-setup.sh
 %{ endif ~}
+
+  # Put Anubis in front of Drupal (needs the key from fetch-secrets.sh and,
+  # for the 443 vhost it switches, tls-setup.sh above)
+  - /opt/anubis-setup.sh
 
   # Restart web services
   - systemctl restart php-fpm

@@ -82,6 +82,20 @@ resource "azurerm_key_vault_secret" "drupal_hash_salt" {
   content_type = "text/plain"
 }
 
+# Anubis signing key. The dev VM is a single instance, so sharing does not
+# matter here, but it goes through Key Vault like production's so a dev deploy
+# exercises the same fetch path. Recreated with the stack on every deploy.
+resource "random_bytes" "anubis_signing_key" {
+  length = 32
+}
+
+resource "azurerm_key_vault_secret" "anubis_signing_key" {
+  name         = "dev-anubis-signing-key"
+  value        = random_bytes.anubis_signing_key.hex
+  key_vault_id = data.terraform_remote_state.secrets.outputs.key_vault_id
+  content_type = "text/plain"
+}
+
 # Read the devtest storage account key from KV. Provisioned by environments/devtest/.
 data "azurerm_key_vault_secret" "devtest_storage_key" {
   name         = "devtest-storage-account-key"
@@ -204,6 +218,7 @@ module "dev_vm" {
     solr_core                 = var.solr_core
     solr_username             = var.solr_username
     solr_password_secret_name = data.azurerm_key_vault_secret.solr_password.name
+    anubis_key_secret_name    = azurerm_key_vault_secret.anubis_signing_key.name
     drupal_search_server_id   = var.drupal_search_server_id
   })
 

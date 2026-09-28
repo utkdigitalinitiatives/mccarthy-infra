@@ -8,7 +8,35 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — production on `0.0.20` at cormacmccarthy.lib.utk.edu, bot protection queued, as of 2026-09-24
+## Work in flight — production on `0.0.21` at cormacmccarthy.lib.utk.edu, Anubis in review (`feat/anubis-bot-protection`), `mccarthy-index` PR #38 awaiting dev review, as of 2026-09-28
+
+**2026-09-28 (Monday): book covers and Drupal uploads.** Later the same day
+Anubis was reviewed, committed and pushed on `feat/anubis-bot-protection`
+(see "bot protection" below for the rollout). Two new Open entries:
+"Book covers: 7,096 images sit in blob storage that Drupal cannot see" and
+"Drupal cannot send mail — route it through Postmark" (board #56). The
+resume point for the covers work is `mccarthy-index` PR #38, waiting on the
+dev's review.
+
+
+**2026-09-25: GitHub is moving `ubuntu-latest` to Ubuntu 26.04 between
+2026-10-19 and 2026-11-19.** Checked every runner dependency against the 26.04
+image; nothing should break. Deferred by the user until after Anubis ships:
+pin the six workflows to `ubuntu-26.04` on a branch and run the manual ones.
+Entry: "`ubuntu-latest` moves to Ubuntu 26.04" at the top of **Open**.
+
+**2026-09-24, afternoon — two small things, both landed.** (1) A dev merge in
+`mccarthy-index` built image `0.0.21` (run `36025885373`, 16:13 UTC) and the
+`drupal-main-merge` dispatch deployed it to production (run `36053199592`,
+20:11 UTC, all jobs green). Rolling upgrade policy, so the instance was
+replaced again; the new instance number was not checked. (2) Commit `f172e17`,
+pushed: the `dump-production-db.yml` step summary now tells devs to run
+`ddev refresh-local <file>` instead of `ddev import-db` + `drush cr` + a manual
+`sql:sanitize`. A dev (aalbro) asked for it and confirmed `refresh-local`
+wraps `import-db`; the old text left images broken (`azblob://` URIs) and
+passwords unscrubbed. First evidence anyone on the dev side has read
+`refresh-local`. Workflow-only commits do **not** trigger a production deploy;
+the deploy at 20:11 was the app-repo dispatch, not this push.
 
 **2026-09-24: production domain cutover — DONE, verified.** Production is
 moving off `libtest1` (`dns-test-rg`, 132.196.154.18, `libtest1.lib.utk.edu`),
@@ -65,8 +93,15 @@ which is a reserve name for dev work, onto its own address and
   "Start Virtual Machine Scale Set" on production at 11:37 UTC 2026-09-24.
   Probably a start/stop automation; not investigated.
 
-**2026-09-23: bot protection — Anubis PLANNED, nothing written, one decision
-open.** Prompted by AI-scraper load concerns. Options weighed and where they
+**2026-09-23: bot protection — Anubis chosen. 2026-09-25: BUILT on branch
+`feat/anubis-bot-protection`, tested locally, NOT committed, NOT pushed, NOT
+merged, NOT applied.** Held on purpose: 2026-09-25 is a Friday and the user
+keeps a no-changes-on-Friday rule. **2026-09-28: reviewed and committed.**
+The review found this entry wrong about the merge: nothing in this repo fires
+on `push` (see "Incidental finding" below), so the `main` merge itself
+changes nothing. Production is brought onto the new config by hand instead —
+see the Rollout list below.
+Prompted by AI-scraper load concerns. Options weighed and where they
 landed:
 
 - **Azure Front Door Premium** — the Azure equivalent (Bot Manager rule set,
@@ -85,65 +120,127 @@ landed:
 - **Anubis on the VM — CHOSEN.** Free, no DNS/TLS/NSG change, and the work
   carries to AKS as an ingress hop if that migration ever happens.
 
-**Design (nothing of this exists yet):** Apache `:443` keeps TLS, `/health`
-and the `/drupal-media/` blob proxy, and `ProxyPass`es everything else to
-Anubis on `127.0.0.1:8923` (`ProxyPreserveHost On`, `X-Real-IP`,
-`X-Forwarded-Proto https`). Anubis targets a new loopback-only vhost
-`127.0.0.1:3001` (`/etc/httpd/conf.d/drupal-backend.conf`) that holds the
-Drupal `DocumentRoot`/php-fpm block moved out of the 443 vhost, with
-`RemoteIPHeader X-Real-IP` + `RemoteIPTrustedProxy 127.0.0.1/32`. The port-80
-redirect vhost is untouched. Drupal already trusts `127.0.0.1` as a proxy
-and honours `X-Forwarded-Proto`, so no `environment.php` change. Both
-`cloud-init.tftpl` files change the same way (dev's self-signed vhost is the
-same shape as production's).
+**As built (2026-09-25).** Binary in THIS repo's app image, not lib-main's
+base image (user's decision 2026-09-25). Files: `packer/variables.pkr.hcl`
+(`anubis_version` 1.27.0 + `anubis_rpm_sha256`), `packer/ansible/playbook.yml`
+(RPM download with SHA256 check, install, policy, SELinux boolean),
+`packer/ansible/files/anubis/drupal.botPolicies.yaml`, both
+`cloud-init.tftpl`, both env `main.tf`, `modules/load-balancer/main.tf`.
 
-- **Signing key must be shared.** Production runs 1–2 instances and rolling
-  updates run two at once, so a per-instance key would re-challenge users on
-  every hop. Plan: `random_bytes` (32) in each env's `main.tf` → Key Vault
-  secret → `fetch-secrets.sh` writes it as `ED25519_PRIVATE_KEY_HEX` into
-  `/etc/anubis/drupal.env` (root:anubis 0640). Never in the repo or tfvars.
-- **Env file** (`/etc/anubis/drupal.env`): `BIND=127.0.0.1:8923`,
-  `TARGET=http://127.0.0.1:3001`, `METRICS_BIND=127.0.0.1:9090`,
-  `POLICY_FNAME=/etc/anubis/drupal.botPolicies.yaml`, `DIFFICULTY=4`,
-  `COOKIE_DOMAIN=<domain_name>`, `WEBMASTER_EMAIL`. Unit is
-  `anubis@drupal.service` (the RPM ships `anubis@.service`, env from
-  `/etc/anubis/%i.env`).
-- **Policy file** imports the defaults (`(data)/bots/_deny-pathological.yaml`,
-  `(data)/crawlers/_allow-good.yaml`, `(data)/common/keep-internet-working.yaml`)
-  and adds `ALLOW` `path_regex` rules for `^/health$`, `^/\.well-known/`,
-  `^/drupal-media/`, `^/robots\.txt$`, sitemap paths. Known good crawlers
-  (Googlebot, Bingbot) pass by default — by UA *and* source IP.
-- **Binary**: RPM from the GitHub release, latest `v1.27.0` →
-  `anubis-1.27.0-1.x86_64.rpm`, SHA256-checked, version pinned as a Packer
-  var, installed in `packer/ansible/playbook.yml`. SELinux: set
-  `httpd_can_network_connect` on idempotently (the `[P]` blob proxy implies it
-  already is, but do not rely on the base image).
-- **Safety rule, non-negotiable:** cloud-init checks `command -v anubis` and
-  writes the *old* direct vhost when it is missing. The cloud-init change
-  lands via `main` merge (which redeploys production — see the comment-only
-  merge trap under Open) while the binary lands via the next app-image build;
-  the two cannot be made to arrive together, so the boot path must tolerate
-  either order.
-- **Rollout:** (1) merge Packer + cloud-init to `main`; production redeploys
-  on the fallback path, nothing changes for users; (2) get a dev image built
-  (an app-repo `dev` merge, or the `bootstrap_build` dispatch) — the Test
-  Cloud-Init workflow cannot test the image half; (3) verify on dev: bare
-  `curl` gets the challenge page, a browser passes, `/health` on `:80` is
-  200 from the LB, `/drupal-media/` serves, Drupal logs show real client
-  IPs; (4) the next dev→main promotion carries it to production.
+- **Request path.** Apache `:443` keeps TLS, `/health` and the
+  `/drupal-media/` blob proxy (`ProxyPass … !` for both) and proxies the rest
+  to Anubis on `127.0.0.1:8923`. Anubis forwards what passes to a new
+  loopback vhost `127.0.0.1:8008` (`/etc/httpd/conf.d/drupal-backend.conf`),
+  which holds the Drupal `DocumentRoot`/php-fpm block. Port-80 vhost
+  untouched, so the LB probe never meets Anubis.
+- **The switch is a marker file, `/etc/anubis/drupal.active`.** The 443 vhost
+  holds both modes under `<IfFile>` / `<IfFile !…>`, and the backend vhost is
+  wrapped in `<IfFile>`, so both are written unconditionally. Only
+  `/opt/anubis-setup.sh` (runcmd, after tls-setup, before the final restarts)
+  creates the marker, and only after: binary present, key present, service
+  up, `apachectl configtest` passes, httpd restarts, and `curl` through
+  Anubis to `/health` returns 200. Any failure removes the marker, disables
+  the unit and restarts httpd: the old direct site. Missing binary logs a
+  neutral line; every other fallback logs `ERROR:`, which on dev trips the
+  build workflow's log scan on purpose. The daily `tls-check` re-run of
+  `tls-setup.sh` rewrites the same vhost text, so it cannot undo the switch.
+- **Signing key.** `random_bytes` (32) → `production-anubis-signing-key` /
+  `dev-anubis-signing-key` in Key Vault → `fetch-secrets.sh` (best effort,
+  does not gate the retry loop) → `/etc/anubis/drupal.key` root 0600 →
+  `anubis-setup.sh` writes it into `/etc/anubis/drupal.env` root 0600.
+  `anubis@.service` uses `DynamicUser=yes`, so there is **no `anubis`
+  group**; systemd reads the env file as root.
+- **Env:** `BIND=127.0.0.1:8923`, `TARGET=http://127.0.0.1:8008`,
+  `METRICS_BIND=127.0.0.1:8924` (9090 is Cockpit's port on RHEL),
+  `POLICY_FNAME`, `DIFFICULTY=4`, `SERVE_ROBOTS_TXT=false`,
+  `REDIRECT_DOMAINS=<domain_name>[,<lb_fqdn>]` on production only (dev is
+  reached by IP). No `COOKIE_DOMAIN` (host-only cookie is right; setting it
+  would share the cookie across `lib.utk.edu`). No `WEBMASTER_EMAIL` yet — no
+  address was chosen.
+- **Policy** is upstream's default minus the two Thoth (paid GeoIP/ASN)
+  rules, with `store: bbolt` at `/var/lib/anubis/drupal/anubis.bdb` (upstream
+  says the memory store is for testing). **Note:** upstream's thresholds let
+  a client that does NOT claim to be a browser through at weight 0, so bare
+  `curl` gets the page, not a challenge — the 2026-09-23 plan was wrong about
+  that. Browser user agents get a challenge; GPTBot and friends get DENY;
+  HeadlessChrome gets DENY.
+- **UT Power T on the challenge pages**, as on digital.lib.utk.edu. The PNG
+  was taken from that live site (it uses one image for all three states) and
+  converted to lossless webp: `packer/ansible/files/anubis/power-t.webp`.
+  Anubis 1.27 compiles its images into the binary (the "custom images"
+  `OVERLAY_FOLDER` feature is BotStopper, the paid edition), so the image
+  build copies it to `/var/www/anubis/img/{pensive,happy,reject}.webp` and
+  the 443 vhost serves that directory at
+  `/.within.website/x/cmd/anubis/static/img/` (`ProxyPass … !` + `Alias`).
+  Anubis's own image names, and so this override, may change on an Anubis
+  upgrade — check `web/static/img/` in the new release. The alt text still
+  says "Sad Anubis"; that is compiled in too.
+
+Four departures from the 2026-09-23 plan, each for a reason found while building:
+
+1. **No `mod_remoteip` on the backend.** With it, `REMOTE_ADDR` becomes the
+   client, Drupal no longer sees its trusted proxy `127.0.0.1`, ignores
+   `X-Forwarded-Proto`, and builds `http://…:8008` URLs. Without it, Drupal
+   takes client IP, scheme, host and port from the headers (it already
+   trusts 127.0.0.1 for XFF/XFH/XFProto/XFPort). The 443 vhost therefore
+   **unsets client-sent `X-Forwarded-For`/`-Host`** (mod_proxy then adds the
+   real ones) and sets `X-Forwarded-Proto https`, `X-Forwarded-Port 443`,
+   `X-Real-Ip`. The backend access log uses `X-Real-Ip` as its first field.
+2. **Port 8008, not 3001.** SELinux labels 8008 `http_port_t`; httpd cannot
+   bind an unlabeled port, and a failed `Listen` stops ALL of httpd.
+   (Unverified on a real VM — the container test had no SELinux. If the bind
+   fails anyway, `anubis-setup.sh` falls back and logs `ERROR:`.)
+3. **`ProxyPreserveHost` is per-`<Location>`: On for `/`, Off for
+   `/drupal-media/`.** Vhost-wide On would send `cormacmccarthy.lib.utk.edu`
+   as Host to Azure Storage on the blob `[P]` proxy.
+4. **LB HTTPS rule `load_distribution = "SourceIP"`.** Anubis stores an
+   issued challenge on the instance that issued it (bbolt and memory are both
+   per instance), so the answer must reach the same instance. The shared key
+   only makes the *pass cookie* portable. Many users behind one NAT address
+   all land on one instance; acceptable at 1–2 instances.
+
+**Tested 2026-09-25, locally only.** Templates rendered with `templatefile`,
+every script `bash -n` + shellcheck clean, both stacks `terraform validate`,
+Packer `validate`. The rendered dev files ran in a Rocky 9 container with
+systemd, httpd, php-fpm and the aarch64 RPM: direct mode, no-key fallback,
+missing-binary fallback, broken-policy fallback, spoofed XFF/XFH dropped,
+`/health` and `/drupal-media/` bypass Anubis (blob proxy got its own Host),
+browser UA challenged, GPTBot denied, and **a real Chrome solved the
+challenge, landed on the original URL with its query string, and loaded a
+second page without a new challenge.** The Ansible tasks ran in a fresh
+container (the SHA check rejects a wrong hash). NOT tested: SELinux, the Key
+Vault fetch, the LB rule, anything on Azure.
+
+- **Rollout:** (1) merge to `main`. This deploys nothing: no workflow here
+  fires on `push`. (1b) Run `deploy-production.yml` by hand with
+  `image_version=0.0.21`. That applies the config half alone: custom_data
+  change → Rolling upgrade replaces the instance, plus the LB rule and the new
+  Key Vault secret. `0.0.21` has no Anubis, so production logs "Anubis is not
+  in this image" and serves as today. Without this step, the next app-repo
+  `main` merge would bring the config and the Anubis image to production in
+  one apply. `build-on-dispatch`
+  only runs from `main` (repository_dispatch), so the image half cannot be
+  tested before this merge. (2) The next app-repo `dev` merge builds an image
+  with Anubis and deploys dev. (3) Verify on dev: browser gets the challenge
+  and passes, `curl -k https://<ip>/user/login` still renders (the smoke
+  test relies on this), `/drupal-media/` serves, the cloud-init log says
+  "Anubis is in front of Drupal", `getenforce` is Enforcing and httpd
+  holds `127.0.0.1:8008`. (4) The next dev→main promotion carries it to
+  production.
+- **Open gap: the fallback only runs on first boot.** `anubis-setup.sh` is a
+  cloud-init `runcmd`, so it does not run again on a plain restart, and the
+  weekday stop/start schedule restarts production daily. If `anubis@drupal`
+  fails to come up on a later boot, the marker is still there: every page
+  gets a proxy error while `/health` (which bypasses Anubis) keeps the LB
+  probe green. Check the unit's `Restart=` on a real VM; consider a boot-time
+  re-run of the check.
 - **Known trade-off:** Anubis requires JavaScript. A no-script visitor sees
   the challenge page and stops. Anubis has a `metarefresh` challenge
   algorithm (weaker, no JS) if the library's accessibility review asks.
 - **Doc-fetching trap:** `anubis.techaro.lol` challenges non-browser fetchers,
-  so tooling gets its own "Access Denied" page. Read the docs raw from
-  `github.com/TecharoHQ/anubis` under `docs/docs/admin/` instead
-  (`native-install.mdx`, `environments/apache.mdx`, `installation.mdx`,
-  `policies.mdx`; defaults in `data/botPolicies.yaml`).
-- **Open decision (the user has not answered):** install the binary in this
-  repo's app image (recommended — ships on the next build, mccarthy only), or
-  in the shared base image in `lib-main-infra` (both sites, but a monthly
-  build in another repo, and lib-main would still need its own cloud-init
-  work). The card is already on the Vikunja board.
+  so tooling gets its own "Access Denied" page. The RPM ships the full docs
+  under `/usr/share/doc/anubis/docs/admin/`; extract it with `bsdtar -xf`
+  on a Mac. The card is already on the Vikunja board.
 
 **2026-09-14: the devs turned on Search API + Solr, and it reached production.**
 `mccarthy-index` PR #25 (`solr-settings` → `dev`) built image `0.0.17`
@@ -423,8 +520,9 @@ consecutive reimage.
 3. ~~**Build the dev DB-dump path**~~ — **done 2026-08-18.**
    `dump-production-db.yml` is green, the dump is in the `db-dumps` container,
    and four devs hold container-scoped read on it. See the Resolved entry. The
-   only untested link is a dev running `ddev import-db` on their own machine,
-   which is on their side of the boundary.
+   only untested link is a dev running `ddev refresh-local` on their own
+   machine, which is on their side of the boundary. 2026-09-24: the workflow
+   summary now names `refresh-local`, not bare `import-db` (commit `f172e17`).
 4. ~~**Local dev tooling for `mccarthy-index` is written but not merged.**~~ —
    **merged 2026-08-19 and 2026-08-20.** PR #9 took all five files to `main`
    (merge `892e95f`): `.ddev/commands/host/refresh-local`,
@@ -707,6 +805,172 @@ destroys them, with nothing logged.
 ---
 
 ## Open
+
+### `ubuntu-latest` moves to Ubuntu 26.04 between 2026-10-19 and 2026-11-19 — test on `ubuntu-26.04` after Anubis ships
+
+**Found 2026-09-25.** GitHub's changelog of 2026-09-17 (and
+`actions/runner-images` issue #14748) says the `ubuntu-latest` label migrates
+from 24.04 to 26.04 gradually over that month, so runs will land on either
+image until it finishes. All 11 jobs in this repo's six workflows use
+`ubuntu-latest`. Checked against the 26.04 image on 2026-09-25 — nothing
+should break:
+
+| What we need | Where it comes from | On 26.04 |
+|---|---|---|
+| Terraform, Packer | `hashicorp/setup-terraform`, `hashicorp/setup-packer` | not from the image, unaffected |
+| Ansible (Packer's `ansible` provisioner) | the image | 2.21.3, present |
+| Azure CLI | the image | 2.90.0, present |
+| `postgresql-client-18` | PGDG apt repo, `$(lsb_release -cs)-pgdg`, in `build-on-dispatch.yml`, `dump-production-db.yml`, `test-cloud-init.yml` | codename is `resolute`; `resolute-pgdg` exists and ships `postgresql-client-18` |
+| `/usr/lib/postgresql/18/bin/pg_dump` major check | `dump-production-db.yml` | same path, unchanged |
+
+The one soft spot is `lsb_release` itself: it is not in the 26.04 software
+list. It is a base Ubuntu package and almost certainly present, but if it is
+missing those three PGDG steps fail at the `echo "deb ..."` line. The
+drop-in fix is `. /etc/os-release; echo "$VERSION_CODENAME"`, which works on
+every Ubuntu.
+
+**Plan (the user's call, 2026-09-25): do this after Anubis ships, not
+before.** On a branch, change `runs-on: ubuntu-latest` to `ubuntu-26.04` in
+all six workflows, run the manual ones (`test-cloud-init.yml`,
+`dump-production-db.yml`, a `build-on-dispatch.yml` dispatch), and merge on a
+non-Friday once they are green. Then either keep the pin or go back to
+`ubuntu-latest` — pinning trades surprise migrations for a manual bump
+every two years. Sources:
+<https://github.blog/changelog/2026-09-17-ubuntu-26-generally-available-and-latest-migration/>,
+<https://github.com/actions/runner-images/issues/14748>,
+<https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2604-Readme.md>.
+
+### Book covers: 7,096 images sit in blob storage that Drupal cannot see — and Drupal's own uploads went to the VM disk
+
+**Found 2026-09-28.** A dev bulk-loaded covers straight into
+`mccprod8yqx588v/drupal-media` on 2026-09-23: 7,096 `.webp` blobs, all at
+the container root, named `isbn13-<13 digits>.webp` (3,748),
+`isbn10-<10 chars>.webp` (3,216) and `oclc-<n>.webp` (132); ~237 MiB. 12
+are under 500 bytes — likely blank placeholders. The owner's rule: covers
+arrive this way only; the bulk path is the supported one.
+
+**Half 1 — Drupal does not see them (app-side, the dev's work, not
+started).** Drupal knows only files with a `file_managed` row. Each cover
+needs a file entity (`azblob://<name>`), a `book_cover` media entity (alt
+text is **required** on `field_media_image`), and the record's `field_cover`
+pointed at it, matched by `field_isbn13` / `field_isbn10` / `field_oclc`.
+A Drush script run on production; test in DDEV and on one cover first. No
+infra change needed.
+
+**Half 2 — Drupal uploads landed on the VM disk. Fix is PR #38.**
+`config/field.storage.media.field_media_image.yml` said `uri_scheme:
+public`, and `public://` on both VMs is
+`/var/www/drupal/web/sites/default/files` on the OS disk (`/dev/sda4`) —
+every deploy replaces the instance and deletes it. The owner first
+deferred this (covers come only by bulk load), then reversed on 2026-09-28:
+some direct Drupal uploads must survive reimaging. `mccarthy-index` PR #38,
+branch `fix/media-image-uploads-to-blob` → `dev`, commit `66ab368`:
+`uri_scheme: azblob`, plus the matching `public` override line in
+`web/sites/default/settings.local.php.example` so DDEV uploads (no blob
+key on laptops) keep working. Devs with an existing `settings.local.php`
+must add that line by hand — do **not** run the `cp` the `refresh-local`
+warning suggests; it overwrites their file. It covers only the
+`field_media_image` field (today only the Book Cover media type); a new
+file field made in DDEV will default to `public` and needs the same fix.
+
+- Verified on the dev VM 2026-09-28 (run-command, read-only): active
+  `uri_scheme` is `public`, `system.file default_scheme` is `public` (more
+  proof `$settings['file_default_scheme']` is inert, see the entry below).
+- A dev uploaded a test image through Drupal on 2026-09-28. It is in
+  neither storage account and not on the dev VM, so it is on the
+  **production** VM disk and dies at the next deploy. Production itself was
+  **not** checked — the session's auto-mode blocked production reads. The
+  read-only check script: `SELECT ... FROM file_managed`, `config:get`,
+  `findmnt`; rerun it by hand via `az vmss run-command invoke` against
+  `mccarthy-production-vmss` if needed.
+- **After the dev deploy:** upload one image on dev, confirm a blob appears
+  under `2026-09/` in `mccdevtesth6srb8na/drupal-media` and the
+  `file_managed` URI starts `azblob://`. Repeat on production after
+  `dev → main`. Any older `public://` covers must be re-uploaded.
+
+**Left alone on purpose (owner's call, 2026-09-28):** Feeds CSV uploads go
+to `public://feeds` (`config/feeds.feed_type.record_import.yml`, fetcher
+`directory`), so they also vanish on reimage. The imported records survive;
+only re-running an old import from its stored file breaks. Not worth
+changing now.
+
+### Drupal cannot send mail — route it through Postmark, mainly for password resets
+
+**Added 2026-09-28.** Local Drupal accounts need the "Forgot your password?"
+email to work. Nothing sends Drupal's mail today. The app repo's
+`config/system.mail.yml` is core's default — `interface.default: php_mail`,
+`mailer_dsn` scheme `sendmail` — and the image installs no MTA; Azure blocks
+outbound port 25 anyway. Not tested on production; assume every
+Drupal-originated email (password reset, `register_admin_created` welcome
+mail, `verify_mail`) is silently dropped.
+
+What already exists: `shared-postmark-api-token` sits in the same vault the
+VMSS reads at boot (`kv_name`, `mccarthy-secrets-rg`), and the workflows
+already send through `smtp.postmarkapp.com:587` with the token as both
+username and password (`build-on-dispatch.yml`, "Email Notification" steps).
+So this is wiring, not new accounts.
+
+Sketch, unverified:
+
+1. **Infra** — `fetch-secrets.sh` in both `cloud-init.tftpl` files fetches
+   `shared-postmark-api-token` and substitutes a `__POSTMARK_TOKEN__`
+   placeholder in `environment.php`, which sets
+   `$config['system.mail']['interface']['default'] = 'symfony_mailer'` and
+   `$config['system.mail']['mailer_dsn']` to `smtp`, host
+   `smtp.postmarkapp.com`, port 587, token as user and password. Core's own
+   `symfony_mailer` plugin reads `mailer_dsn`; no contrib module needed.
+   Check the VMSS identity's `Key Vault Secrets User` covers this secret.
+2. **Sender** — `system.site` `mail` must be an address Postmark will send
+   as. The workflows send as `wveale@utk.edu`, a personal sender signature.
+   A site address (e.g. a `lib.utk.edu` one) needs its own signature, or
+   domain DKIM/Return-Path records from OIT — the same ticket path as the A
+   record in the domain cutover.
+3. **Dev VM** — decide whether dev sends real mail. Probably not: dev holds
+   a copy of production users, so a reset test on dev mails real people.
+4. **Test** — request a reset for a test account on production, confirm
+   delivery, check Postmark's activity log.
+
+### No onboarding path exists for a second operator or sysadmin — write down every file and permission they need
+
+**Added 2026-09-24.** `docs/developer-onboarding.md` covers a Drupal developer
+(DDEV, dumps, container-scoped blob RBAC) and nothing else. Nobody has written
+what a person needs to *operate* this repository — run a plan, apply a stack,
+trigger a deploy, rotate a credential. Today that knowledge is one person's
+laptop and one person's Azure/GitHub accounts, which is a bus-factor of one.
+
+What the document has to enumerate, each with where it comes from and who can
+grant it:
+
+- **Local files that are gitignored and never leave the laptop.** Per stack
+  (`environments/secrets`, `environments/devtest`, `environments/production`):
+  `backend.hcl` and `terraform.tfvars`. The `.example` copies are tracked but
+  the real values are not, and `production/terraform.tfvars` carries
+  `public_ip_id`, `domain_name` and the mandatory `image_version` pin.
+  `environments/dev` may need the same. Also the lib-dispatch GitHub App
+  private key (`.pem`), which exists only on the operator's laptop and is not
+  in any vault, and `docs/developer-onboarding.md` itself, which is gitignored
+  on purpose.
+- **Azure.** Which PIM-eligible role on which scope (the Owner activation
+  gotchas belong in the runbook), Key Vault secret read on
+  `mccarthy-secrets-rg`, and Storage Blob Data Contributor on the tfstate
+  account — otherwise `terraform init` fails before anything else does.
+  Whether a second person needs their own SP or shares the CI one.
+- **GitHub.** Write on `mccarthy-infra` (for `workflow_dispatch`); the
+  `--admin` bypass on `mccarthy-index` merges; who can edit the repository
+  variables (`PROJECT_NAME`, `DEVTEST_STORAGE_ACCOUNT`, `PUBLIC_IP_ID`,
+  `DOMAIN_NAME`, the deploy-notification list) and the three `AZURE_*`
+  secrets; org-level access to the lib-dispatch App.
+- **Terraform state.** Backend account, container, key names, and the fact
+  that the production public IP and the DefenderForStorage setting are
+  deliberately outside state (both entries elsewhere in this file).
+- **The reading order.** README, `docs/bootstrap-runbook.md`, this file's
+  "Work in flight" table, then the app repo's `CLAUDE.md`.
+
+Shape: a tracked `docs/operator-onboarding.md` with a checklist the granting
+person ticks, plus a short "what to hand over" list for the leaving person.
+Values stay out of it; this repository is public. **Do not fold it into
+`developer-onboarding.md`** — that file is gitignored and dev-facing, and
+its audience should not see the operator surface.
 
 ### Proposed: migrate both sites off Packer VMs onto containers on Asimov — decision doc written, nothing executed
 
@@ -2043,7 +2307,9 @@ lib-main's own TODO proposes for when its database goes private:
 
 Dev loop: trigger the workflow → `az storage blob download --account-name
 mccdevtesth6srb8na --container-name db-dumps --name <file> --file <file>
---auth-mode login` → `ddev import-db --src=<file>` → `ddev drush cr`.
+--auth-mode login` → `ddev refresh-local <file>` (which runs `import-db`,
+rewrites `azblob://` → `public://`, pulls media, sanitizes, and `drush cr`;
+the summary said bare `import-db` until commit `f172e17`, 2026-09-24).
 
 **No version mismatch on the restore side**: `.ddev/config.yaml` in
 `mccarthy-index` already pins `database.type: postgres`, `version: "18"`.
