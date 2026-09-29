@@ -959,25 +959,42 @@ already send through `smtp.postmarkapp.com:587` with the token as both
 username and password (`build-on-dispatch.yml`, "Email Notification" steps).
 So this is wiring, not new accounts.
 
-Sketch, unverified:
+**2026-09-29: built on `feat/drupal-postmark-mail`, production only.**
 
-1. **Infra** — `fetch-secrets.sh` in both `cloud-init.tftpl` files fetches
-   `shared-postmark-api-token` and substitutes a `__POSTMARK_TOKEN__`
-   placeholder in `environment.php`, which sets
-   `$config['system.mail']['interface']['default'] = 'symfony_mailer'` and
-   `$config['system.mail']['mailer_dsn']` to `smtp`, host
-   `smtp.postmarkapp.com`, port 587, token as user and password. Core's own
-   `symfony_mailer` plugin reads `mailer_dsn`; no contrib module needed.
-   Check the VMSS identity's `Key Vault Secrets User` covers this secret.
-2. **Sender** — `system.site` `mail` must be an address Postmark will send
-   as. The workflows send as `wveale@utk.edu`, a personal sender signature.
-   A site address (e.g. a `lib.utk.edu` one) needs its own signature, or
-   domain DKIM/Return-Path records from OIT — the same ticket path as the A
-   record in the domain cutover.
-3. **Dev VM** — decide whether dev sends real mail. Probably not: dev holds
-   a copy of production users, so a reset test on dev mails real people.
-4. **Test** — request a reset for a test account on production, confirm
-   delivery, check Postmark's activity log.
+1. **Infra (done)** — production `cloud-init.tftpl`: `fetch-secrets.sh`
+   fetches `shared-postmark-api-token` best-effort (it does not gate the
+   retry loop) and substitutes `__POSTMARK_TOKEN__` in `environment.php`.
+   There, only when the placeholder was replaced, `system.mail`
+   `interface.default` becomes `symfony_mailer` and `mailer_dsn` becomes
+   `smtp` / `smtp.postmarkapp.com` / 587 / token as user and password. No
+   token means core's default mailer stays, exactly as before; the boot log
+   says which (`Drupal mail goes through Postmark` or `WARNING: no Postmark
+   token`). The VMSS role is `Key Vault Secrets User` on the whole vault, so
+   it covers this secret. SELinux: the app image sets
+   `httpd_can_network_connect`, so php-fpm may open 587.
+2. **Core plugin checked** — Drupal 11.4.5 core ships
+   `Drupal\Core\Mail\Plugin\Mail\SymfonyMailer` (id `symfony_mailer`,
+   labelled Experimental); it builds `new Dsn(...$mailer_dsn)`, so the keys
+   must be exactly `scheme host user password port options`. No contrib module.
+3. **Sender (no work needed)** — the site address is `librarieswebsite@utk.edu`
+   (`system.site` `mail`, same as lib-main). The shared token belongs to the
+   Postmark server "DevOps" (ID 18363789); the old Pantheon site used a
+   different server, "Libraries Website" (13950582). Sender signatures are
+   per account, and a send FROM `librarieswebsite@utk.edu` to
+   `test@blackhole.postmarkapp.com` with the shared token was accepted
+   (API, then SMTP through symfony/mailer 7.4.15 with the exact DSN array
+   above). So the DevOps server may send as the site address today.
+4. **Dev VM (decided: no mail)** — dev is untouched. It holds a copy of
+   production users, so a reset test there would mail real people.
+5. **Rollout** — merge, then a config-only `deploy-production.yml` run with
+   the image already on production (`0.0.24`); the new `custom_data`
+   replaces the instance. Then on the instance: `grep -i postmark
+   /var/log/drupal-init.log`.
+6. **Test (not done)** — request a password reset on
+   `https://cormacmccarthy.lib.utk.edu/user/password` for a test account
+   whose inbox we control; confirm it arrives (check spam) and shows in the
+   DevOps server's activity log in Postmark. A failed send is logged in
+   Drupal's watchdog by `SymfonyMailer::mail()`.
 
 ### No onboarding path exists for a second operator or sysadmin — write down every file and permission they need
 
