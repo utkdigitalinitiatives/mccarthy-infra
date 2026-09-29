@@ -8,15 +8,63 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — production on `0.0.21` at cormacmccarthy.lib.utk.edu, Anubis in review (`feat/anubis-bot-protection`), `mccarthy-index` PR #38 awaiting dev review, as of 2026-09-28
+## Work in flight — `0.0.24` (#35 + #36 + #38 + Anubis) is ON production; a Drupal dev still has to test uploads there, as of 2026-09-29
 
-**2026-09-28 (Monday): book covers and Drupal uploads.** Later the same day
-Anubis was reviewed, committed and pushed on `feat/anubis-bot-protection`
-(see "bot protection" below for the rollout). Two new Open entries:
+**2026-09-29 (Tuesday): production verified.** `deploy-on-main-merge.yml`
+run `36475297249` green (Deploy to Production 6m43s, Cleanup Dev VM done).
+On `https://cormacmccarthy.lib.utk.edu/`: curl gets the Drupal page (200), a
+Firefox UA gets "Making sure you're not a bot!", GPTBot gets "Oh noes!". The
+user solved challenges in a real browser and reports Anubis "working great".
+**Still open:** a Drupal developer must test uploads (#38, `uri_scheme`
+azblob) on production — only dev has been checked. Ask them to upload an
+image through the Drupal UI and confirm it renders from `/drupal-media/`.
+Board #51 moved to Done; #57 is in Feedback - Hold until that production
+upload test passes.
+
+
+**2026-09-28 (Monday, afternoon): Anubis rollout step 1 done; the next
+`dev → main` promotion is a four-part bundle.**
+- Anubis PR #3 merged (`42d1386`). Then `deploy-production.yml` run
+  `36468459891` with `image_version=0.0.21`, green: instance 15 logs "Anubis
+  is not in this image", `/etc/anubis/drupal.key` is root 0600, `/` and
+  `/user/login` 200. The `image_version_is_newest` check warned (0.0.23 is
+  newer) — expected, it does not block.
+- `mccarthy-index` PR #38 (upload fix) merged to `dev` 2026-09-28 19:12 UTC.
+  `build-on-dispatch` run `36470687066` builds the **first image with
+  Anubis** (0.0.22/0.0.23 were built that morning, before the Anubis merge,
+  and have none) and replaces the dev VM that was running #36.
+- **Dev verified 2026-09-28** on `0.0.24` (run `36470687066`, green; dev VM
+  `20.110.96.177`): log says "Anubis is in front of Drupal", SELinux
+  Enforcing with 0 AVC denials, httpd on `127.0.0.1:8008`, Anubis on
+  8923/8924, curl gets the login form, a Firefox UA gets the challenge,
+  GPTBot gets "Oh noes!", `/drupal-media/` reaches Azure without a challenge
+  even for a browser UA, key/env files root 0600. The user checked search
+  (#36), taxonomy pages (#35) and an upload (#38) in a browser.
+  `anubis@drupal` has `Restart=always`, `RestartSec=30s` — this softens the
+  first-boot-only gap (board #58) but does not close it.
+- **`mccarthy-index` PR #41 (`dev → main`) merged 19:52 UTC** (`64d6368`).
+  `deploy-on-main-merge.yml` run `36475297249` was still running
+  when the session ended. **Resume point (2026-09-29) — done, see above:**
+  `gh run view 36475297249 -R utkdigitalinitiatives/mccarthy-infra`; if
+  green, verify Anubis on production the way dev was verified (curl vs.
+  browser UA vs. GPTBot on `https://cormacmccarthy.lib.utk.edu/`, the log
+  line in `/var/log/drupal-init.log`, `getenforce`, `/drupal-media/`), then
+  solve a challenge in a real browser twice in a row (SourceIP affinity and
+  the shared key are untested until production). Then move board #51 and #57
+  to Done.
+- **Why it was one bundle:** a `dev → main` PR carries #35 + #36 + #38 + Anubis to
+  production in ONE deploy. `main` can only take `dev` whole (the
+  `dev-to-main` check), and `dev` is 10 commits / 14 files ahead from #35 and
+  #36 alone. dshaw11 (author of #35/#36) confirmed both are production-ready
+  on 2026-09-28, so the only gate left is the dev verification above. Mind
+  the weekday stop at 22:30 UTC.
+
+**2026-09-28 (Monday, morning): book covers and Drupal uploads.** Two new
+Open entries:
 "Book covers: 7,096 images sit in blob storage that Drupal cannot see" and
 "Drupal cannot send mail — route it through Postmark" (board #56). The
-resume point for the covers work is `mccarthy-index` PR #38, waiting on the
-dev's review.
+covers fix, `mccarthy-index` PR #38, was approved and merged to `dev` in the
+afternoon (above).
 
 
 **2026-09-25: GitHub is moving `ubuntu-latest` to Ubuntu 26.04 between
@@ -99,7 +147,8 @@ merged, NOT applied.** Held on purpose: 2026-09-25 is a Friday and the user
 keeps a no-changes-on-Friday rule. **2026-09-28: reviewed and committed.**
 The review found this entry wrong about the merge: nothing in this repo fires
 on `push` (see "Incidental finding" below), so the `main` merge itself
-changes nothing. Production is brought onto the new config by hand instead —
+changes nothing. Production was brought onto the new config by hand
+instead (done 2026-09-28, see the top of "Work in flight") —
 see the Rollout list below.
 Prompted by AI-scraper load concerns. Options weighed and where they
 landed:
