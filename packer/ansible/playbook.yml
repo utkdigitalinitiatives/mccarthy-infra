@@ -246,3 +246,20 @@
     - name: Allow httpd to open network connections
       ansible.builtin.command: setsebool -P httpd_can_network_connect 1
       when: "'--> on' not in httpd_network_bool.stdout"
+
+    # ==========================================================================
+    # PHP upload limits
+    # ==========================================================================
+    # The base image's [drupal] pool caps uploads at 64M, too small for the
+    # book cover import ZIPs (largest ~167 MB). The pool's php_value lines
+    # override php.ini and php.d, so the change has to go in the pool file.
+    # max_input_time bounds how long PHP may spend reading the request body.
+    - name: Raise the PHP upload limits in the drupal php-fpm pool
+      ansible.builtin.lineinfile:
+        path: /etc/php-fpm.d/drupal.conf
+        regexp: "^php_value\\[{{ item.key }}\\]"
+        line: "php_value[{{ item.key }}] = {{ item.value }}"
+      loop:
+        - { key: upload_max_filesize, value: 256M }
+        - { key: post_max_size, value: 256M }
+        - { key: max_input_time, value: "300" }
