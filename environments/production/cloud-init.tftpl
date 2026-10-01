@@ -71,8 +71,9 @@ write_files:
       $config['az_blob_fs.settings']['az_blob_protocol'] = 'https';
       $config['az_blob_fs.settings']['az_blob_cdn_host_name'] = '${domain_name}';
 
-      // Default file scheme
-      $settings['file_default_scheme'] = 'azblob';
+      // The default file scheme is config, not a setting: system.file
+      // default_scheme in the app repo's config/system.file.yml. Drupal 8+
+      // never reads $settings['file_default_scheme'].
 
       // Search API Solr connector: point the committed server entity (which
       // carries the developers' DDEV host/core/login) at the shared SolrCloud.
@@ -482,6 +483,10 @@ write_files:
           <FilesMatch \.php$>
               SetHandler "proxy:unix:/run/php-fpm/drupal.sock|fcgi://localhost"
           </FilesMatch>
+
+          # Same as the 443 vhost. Without it Apache's 60 s default applies
+          # here and cuts off long PHP requests, such as a large ZIP upload.
+          ProxyTimeout 300
 
           # Every request here comes from Anubis, so log the client it saw.
           LogFormat "%%{X-Real-Ip}i %l %u %t \"%r\" %>s %b \"%%{Referer}i\" \"%%{User-Agent}i\"" anubis_backend
