@@ -962,7 +962,7 @@ So this is wiring, not new accounts.
 **2026-09-29: built on `feat/drupal-postmark-mail`, production only.**
 
 1. **Infra (done)** — production `cloud-init.tftpl`: `fetch-secrets.sh`
-   fetches `shared-postmark-api-token` best-effort (it does not gate the
+   fetches `production-drupal-postmark-token` best-effort (it does not gate the
    retry loop) and substitutes `__POSTMARK_TOKEN__` in `environment.php`.
    There, only when the placeholder was replaced, `system.mail`
    `interface.default` becomes `symfony_mailer` and `mailer_dsn` becomes
@@ -984,6 +984,14 @@ So this is wiring, not new accounts.
    `test@blackhole.postmarkapp.com` with the shared token was accepted
    (API, then SMTP through symfony/mailer 7.4.15 with the exact DSN array
    above). So the DevOps server may send as the site address today.
+
+   **2026-10-01: switched to "Libraries Website" (user's call).** Drupal's
+   mail uses its own Key Vault secret, `production-drupal-postmark-token`
+   (seeded by hand, not in TF state), holding a token for the Libraries
+   Website server. Deploy mail from the workflows stays on DevOps
+   (`shared-postmark-api-token`). The secret must exist before the deploy;
+   without it the boot log says `WARNING: no Postmark token` and Drupal
+   sends nothing.
 4. **Dev VM (decided: no mail)** — dev is untouched. It holds a copy of
    production users, so a reset test there would mail real people.
 5. **Rollout** — merge, then a config-only `deploy-production.yml` run with
@@ -993,7 +1001,7 @@ So this is wiring, not new accounts.
 6. **Test (not done)** — request a password reset on
    `https://cormacmccarthy.lib.utk.edu/user/password` for a test account
    whose inbox we control; confirm it arrives (check spam) and shows in the
-   DevOps server's activity log in Postmark. A failed send is logged in
+   Libraries Website server's activity log in Postmark. A failed send is logged in
    Drupal's watchdog by `SymfonyMailer::mail()`.
 
 ### No onboarding path exists for a second operator or sysadmin — write down every file and permission they need
