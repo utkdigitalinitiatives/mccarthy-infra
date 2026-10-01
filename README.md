@@ -50,8 +50,7 @@ app repo: dev -> main     --(drupal-main-merge)--> resolve newest gallery image
 - TLS via Let's Encrypt on the VM (not on the load balancer), with certs
   persisted to blob storage so they survive reimages
 
-Region `eastus2`. Production is deallocated overnight and at weekends by
-`production-schedule.yml`; disable that workflow once the site is public-facing.
+Region `eastus2`.
 
 ## Shared base image
 
@@ -145,8 +144,7 @@ mccarthy-infra/
 │   ├── deploy-on-main-merge.yml   # drupal-main-merge -> production rolling deploy, destroy dev VM
 │   ├── deploy-production.yml      # manual rollback / emergency deploy
 │   ├── test-cloud-init.yml        # manual cloud-init iteration on an existing image
-│   ├── dump-production-db.yml     # manual -> production dump into private blob, for local DDEV
-│   └── production-schedule.yml    # nightly/weekend deallocate (cost control)
+│   └── dump-production-db.yml     # manual -> production dump into private blob, for local DDEV
 ├── packer/
 │   ├── plugins.pkr.hcl
 │   ├── variables.pkr.hcl
