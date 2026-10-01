@@ -8,15 +8,63 @@ re-derive the problem: what breaks, how it was verified, and what the fix is.
 
 ---
 
-## Work in flight — production on `0.0.21` at cormacmccarthy.lib.utk.edu, Anubis in review (`feat/anubis-bot-protection`), `mccarthy-index` PR #38 awaiting dev review, as of 2026-09-28
+## Work in flight — `0.0.24` (#35 + #36 + #38 + Anubis) is ON production; a Drupal dev still has to test uploads there, as of 2026-09-29
 
-**2026-09-28 (Monday): book covers and Drupal uploads.** Later the same day
-Anubis was reviewed, committed and pushed on `feat/anubis-bot-protection`
-(see "bot protection" below for the rollout). Two new Open entries:
+**2026-09-29 (Tuesday): production verified.** `deploy-on-main-merge.yml`
+run `36475297249` green (Deploy to Production 6m43s, Cleanup Dev VM done).
+On `https://cormacmccarthy.lib.utk.edu/`: curl gets the Drupal page (200), a
+Firefox UA gets "Making sure you're not a bot!", GPTBot gets "Oh noes!". The
+user solved challenges in a real browser and reports Anubis "working great".
+**Still open:** a Drupal developer must test uploads (#38, `uri_scheme`
+azblob) on production — only dev has been checked. Ask them to upload an
+image through the Drupal UI and confirm it renders from `/drupal-media/`.
+Board #51 moved to Done; #57 is in Feedback - Hold until that production
+upload test passes.
+
+
+**2026-09-28 (Monday, afternoon): Anubis rollout step 1 done; the next
+`dev → main` promotion is a four-part bundle.**
+- Anubis PR #3 merged (`42d1386`). Then `deploy-production.yml` run
+  `36468459891` with `image_version=0.0.21`, green: instance 15 logs "Anubis
+  is not in this image", `/etc/anubis/drupal.key` is root 0600, `/` and
+  `/user/login` 200. The `image_version_is_newest` check warned (0.0.23 is
+  newer) — expected, it does not block.
+- `mccarthy-index` PR #38 (upload fix) merged to `dev` 2026-09-28 19:12 UTC.
+  `build-on-dispatch` run `36470687066` builds the **first image with
+  Anubis** (0.0.22/0.0.23 were built that morning, before the Anubis merge,
+  and have none) and replaces the dev VM that was running #36.
+- **Dev verified 2026-09-28** on `0.0.24` (run `36470687066`, green; dev VM
+  `20.110.96.177`): log says "Anubis is in front of Drupal", SELinux
+  Enforcing with 0 AVC denials, httpd on `127.0.0.1:8008`, Anubis on
+  8923/8924, curl gets the login form, a Firefox UA gets the challenge,
+  GPTBot gets "Oh noes!", `/drupal-media/` reaches Azure without a challenge
+  even for a browser UA, key/env files root 0600. The user checked search
+  (#36), taxonomy pages (#35) and an upload (#38) in a browser.
+  `anubis@drupal` has `Restart=always`, `RestartSec=30s` — this softens the
+  first-boot-only gap (board #58) but does not close it.
+- **`mccarthy-index` PR #41 (`dev → main`) merged 19:52 UTC** (`64d6368`).
+  `deploy-on-main-merge.yml` run `36475297249` was still running
+  when the session ended. **Resume point (2026-09-29) — done, see above:**
+  `gh run view 36475297249 -R utkdigitalinitiatives/mccarthy-infra`; if
+  green, verify Anubis on production the way dev was verified (curl vs.
+  browser UA vs. GPTBot on `https://cormacmccarthy.lib.utk.edu/`, the log
+  line in `/var/log/drupal-init.log`, `getenforce`, `/drupal-media/`), then
+  solve a challenge in a real browser twice in a row (SourceIP affinity and
+  the shared key are untested until production). Then move board #51 and #57
+  to Done.
+- **Why it was one bundle:** a `dev → main` PR carries #35 + #36 + #38 + Anubis to
+  production in ONE deploy. `main` can only take `dev` whole (the
+  `dev-to-main` check), and `dev` is 10 commits / 14 files ahead from #35 and
+  #36 alone. dshaw11 (author of #35/#36) confirmed both are production-ready
+  on 2026-09-28, so the only gate left is the dev verification above. Mind
+  the weekday stop at 22:30 UTC.
+
+**2026-09-28 (Monday, morning): book covers and Drupal uploads.** Two new
+Open entries:
 "Book covers: 7,096 images sit in blob storage that Drupal cannot see" and
 "Drupal cannot send mail — route it through Postmark" (board #56). The
-resume point for the covers work is `mccarthy-index` PR #38, waiting on the
-dev's review.
+covers fix, `mccarthy-index` PR #38, was approved and merged to `dev` in the
+afternoon (above).
 
 
 **2026-09-25: GitHub is moving `ubuntu-latest` to Ubuntu 26.04 between
@@ -99,7 +147,8 @@ merged, NOT applied.** Held on purpose: 2026-09-25 is a Friday and the user
 keeps a no-changes-on-Friday rule. **2026-09-28: reviewed and committed.**
 The review found this entry wrong about the merge: nothing in this repo fires
 on `push` (see "Incidental finding" below), so the `main` merge itself
-changes nothing. Production is brought onto the new config by hand instead —
+changes nothing. Production was brought onto the new config by hand
+instead (done 2026-09-28, see the top of "Work in flight") —
 see the Rollout list below.
 Prompted by AI-scraper load concerns. Options weighed and where they
 landed:
@@ -910,25 +959,50 @@ already send through `smtp.postmarkapp.com:587` with the token as both
 username and password (`build-on-dispatch.yml`, "Email Notification" steps).
 So this is wiring, not new accounts.
 
-Sketch, unverified:
+**2026-09-29: built on `feat/drupal-postmark-mail`, production only.**
 
-1. **Infra** — `fetch-secrets.sh` in both `cloud-init.tftpl` files fetches
-   `shared-postmark-api-token` and substitutes a `__POSTMARK_TOKEN__`
-   placeholder in `environment.php`, which sets
-   `$config['system.mail']['interface']['default'] = 'symfony_mailer'` and
-   `$config['system.mail']['mailer_dsn']` to `smtp`, host
-   `smtp.postmarkapp.com`, port 587, token as user and password. Core's own
-   `symfony_mailer` plugin reads `mailer_dsn`; no contrib module needed.
-   Check the VMSS identity's `Key Vault Secrets User` covers this secret.
-2. **Sender** — `system.site` `mail` must be an address Postmark will send
-   as. The workflows send as `wveale@utk.edu`, a personal sender signature.
-   A site address (e.g. a `lib.utk.edu` one) needs its own signature, or
-   domain DKIM/Return-Path records from OIT — the same ticket path as the A
-   record in the domain cutover.
-3. **Dev VM** — decide whether dev sends real mail. Probably not: dev holds
-   a copy of production users, so a reset test on dev mails real people.
-4. **Test** — request a reset for a test account on production, confirm
-   delivery, check Postmark's activity log.
+1. **Infra (done)** — production `cloud-init.tftpl`: `fetch-secrets.sh`
+   fetches `production-drupal-postmark-token` best-effort (it does not gate the
+   retry loop) and substitutes `__POSTMARK_TOKEN__` in `environment.php`.
+   There, only when the placeholder was replaced, `system.mail`
+   `interface.default` becomes `symfony_mailer` and `mailer_dsn` becomes
+   `smtp` / `smtp.postmarkapp.com` / 587 / token as user and password. No
+   token means core's default mailer stays, exactly as before; the boot log
+   says which (`Drupal mail goes through Postmark` or `WARNING: no Postmark
+   token`). The VMSS role is `Key Vault Secrets User` on the whole vault, so
+   it covers this secret. SELinux: the app image sets
+   `httpd_can_network_connect`, so php-fpm may open 587.
+2. **Core plugin checked** — Drupal 11.4.5 core ships
+   `Drupal\Core\Mail\Plugin\Mail\SymfonyMailer` (id `symfony_mailer`,
+   labelled Experimental); it builds `new Dsn(...$mailer_dsn)`, so the keys
+   must be exactly `scheme host user password port options`. No contrib module.
+3. **Sender (no work needed)** — the site address is `librarieswebsite@utk.edu`
+   (`system.site` `mail`, same as lib-main). The shared token belongs to the
+   Postmark server "DevOps" (ID 18363789); the old Pantheon site used a
+   different server, "Libraries Website" (13950582). Sender signatures are
+   per account, and a send FROM `librarieswebsite@utk.edu` to
+   `test@blackhole.postmarkapp.com` with the shared token was accepted
+   (API, then SMTP through symfony/mailer 7.4.15 with the exact DSN array
+   above). So the DevOps server may send as the site address today.
+
+   **2026-10-01: switched to "Libraries Website" (user's call).** Drupal's
+   mail uses its own Key Vault secret, `production-drupal-postmark-token`
+   (seeded by hand, not in TF state), holding a token for the Libraries
+   Website server. Deploy mail from the workflows stays on DevOps
+   (`shared-postmark-api-token`). The secret must exist before the deploy;
+   without it the boot log says `WARNING: no Postmark token` and Drupal
+   sends nothing.
+4. **Dev VM (decided: no mail)** — dev is untouched. It holds a copy of
+   production users, so a reset test there would mail real people.
+5. **Rollout** — merge, then a config-only `deploy-production.yml` run with
+   the image already on production (`0.0.24`); the new `custom_data`
+   replaces the instance. Then on the instance: `grep -i postmark
+   /var/log/drupal-init.log`.
+6. **Test (not done)** — request a password reset on
+   `https://cormacmccarthy.lib.utk.edu/user/password` for a test account
+   whose inbox we control; confirm it arrives (check spam) and shows in the
+   Libraries Website server's activity log in Postmark. A failed send is logged in
+   Drupal's watchdog by `SymfonyMailer::mail()`.
 
 ### No onboarding path exists for a second operator or sysadmin — write down every file and permission they need
 
