@@ -85,13 +85,21 @@ write_files:
       $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['username'] = '${solr_username}';
       $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['password'] = '__SOLR_PASSWORD__';
 
-      // Outgoing mail (password resets, account mail) through Postmark SMTP,
-      // using core's symfony_mailer plugin; the image has no MTA and Azure
-      // blocks port 25. The token is both SMTP user and password, substituted
-      // at boot by /opt/fetch-secrets.sh. If Key Vault gave none, the
-      // placeholder stays and Drupal keeps core's default mailer.
+      // Outgoing mail (password resets, account mail) through Postmark; the
+      // image has no MTA and Azure blocks port 25. The server token is
+      // substituted at boot by /opt/fetch-secrets.sh. If Key Vault gave none,
+      // the placeholder stays and Drupal keeps its default mailer.
+      // Two paths, one token, and each ignores the other's config:
+      // - with the app's postmark + mailsystem modules (mccarthy-index #58),
+      //   mailsystem routes all mail to the Postmark API, which reads only
+      //   postmark.settings and always sends from the sender signature
+      //   (the system.site mail address);
+      // - without them, core's symfony_mailer over Postmark SMTP, the token
+      //   as both user and password.
       $postmark_token = '__POSTMARK_TOKEN__';
       if (!str_starts_with($postmark_token, '__')) {
+        $config['postmark.settings']['postmark_api_key'] = $postmark_token;
+        $config['postmark.settings']['postmark_sender_signature'] = 'librarieswebsite@utk.edu';
         $config['system.mail']['interface']['default'] = 'symfony_mailer';
         $config['system.mail']['mailer_dsn'] = [
           'scheme' => 'smtp',
@@ -216,7 +224,7 @@ write_files:
       PYEOF
 
       if [ -n "$POSTMARK_TOKEN" ]; then
-        log "Drupal mail goes through Postmark (smtp.postmarkapp.com:587)"
+        log "Drupal mail goes through Postmark (Libraries Website server)"
       else
         log "WARNING: no Postmark token from Key Vault; Drupal cannot send mail"
       fi
