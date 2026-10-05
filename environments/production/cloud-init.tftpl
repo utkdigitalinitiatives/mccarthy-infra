@@ -86,6 +86,33 @@ write_files:
       $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['username'] = '${solr_username}';
       $config['search_api.server.${drupal_search_server_id}']['backend_config']['connector_config']['password'] = '__SOLR_PASSWORD__';
 
+      // Outgoing mail (password resets, account mail) through Postmark; the
+      // image has no MTA and Azure blocks port 25. The server token is
+      // substituted at boot by /opt/fetch-secrets.sh. If Key Vault gave none,
+      // the placeholder stays and Drupal keeps its default mailer.
+      // Two paths, one token, and each ignores the other's config:
+      // - with the app's postmark + mailsystem modules (mccarthy-index #58),
+      //   mailsystem routes all mail to the Postmark API, which reads only
+      //   postmark.settings and always sends from the sender signature
+      //   (the system.site mail address);
+      // - without them, core's symfony_mailer over Postmark SMTP, the token
+      //   as both user and password.
+      $postmark_token = '__POSTMARK_TOKEN__';
+      if (!str_starts_with($postmark_token, '__')) {
+        $config['postmark.settings']['postmark_api_key'] = $postmark_token;
+        $config['postmark.settings']['postmark_sender_signature'] = 'librarieswebsite@utk.edu';
+        $config['system.mail']['interface']['default'] = 'symfony_mailer';
+        $config['system.mail']['mailer_dsn'] = [
+          'scheme' => 'smtp',
+          'host' => 'smtp.postmarkapp.com',
+          'user' => $postmark_token,
+          'password' => $postmark_token,
+          'port' => 587,
+          'options' => [],
+        ];
+      }
+      unset($postmark_token);
+
       // Reverse proxy settings for Azure Load Balancer
       $settings['reverse_proxy'] = TRUE;
       $settings['reverse_proxy_addresses'] = ['127.0.0.1', '168.63.129.16'];
@@ -112,6 +139,7 @@ write_files:
       PRIVATE_STORAGE_KEY_SECRET="${private_files_key_secret_name}"
       SOLR_PASSWORD_SECRET="${solr_password_secret_name}"
       ANUBIS_KEY_SECRET="${anubis_key_secret_name}"
+      POSTMARK_TOKEN_SECRET="${postmark_token_secret_name}"
       ANUBIS_KEY_FILE="/etc/anubis/drupal.key"
       ENV_PHP="/etc/drupal/environment.php"
       SECRETS_ENV="/etc/drupal/secrets.env"
@@ -148,6 +176,7 @@ write_files:
       PRIVATE_STORAGE_KEY=""
       SOLR_PASSWORD=""
       ANUBIS_KEY=""
+      POSTMARK_TOKEN=""
       for attempt in $(seq 1 18); do
         TOKEN=$(get_token || true)
         if [ -n "$TOKEN" ]; then
@@ -163,6 +192,9 @@ write_files:
           # Best-effort: /opt/anubis-setup.sh serves Drupal without Anubis when
           # this is missing, so it does not gate the loop either.
           ANUBIS_KEY=$(fetch_secret "$ANUBIS_KEY_SECRET" "$TOKEN" || true)
+          # Best-effort: without it Drupal keeps its default mailer and the
+          # site still serves; only Drupal's own mail is lost.
+          POSTMARK_TOKEN=$(fetch_secret "$POSTMARK_TOKEN_SECRET" "$TOKEN" || true)
           [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && [ -n "$SOLR_PASSWORD" ] && break
         fi
         log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
@@ -177,7 +209,7 @@ write_files:
       # Substitute placeholders in environment.php. Use python rather than sed
       # so '/' '&' '|' in values don't need escaping.
       DB_PASSWORD="$DB_PASSWORD" HASH_SALT="$HASH_SALT" STORAGE_KEY="$STORAGE_KEY" SOLR_PASSWORD="$SOLR_PASSWORD" \
-        python3 - "$ENV_PHP" <<'PYEOF'
+        POSTMARK_TOKEN="$POSTMARK_TOKEN" python3 - "$ENV_PHP" <<'PYEOF'
       import os, sys
       path = sys.argv[1]
       with open(path) as f:
@@ -186,9 +218,17 @@ write_files:
       content = content.replace('__HASH_SALT__', os.environ['HASH_SALT'])
       content = content.replace('__STORAGE_KEY__', os.environ['STORAGE_KEY'])
       content = content.replace('__SOLR_PASSWORD__', os.environ['SOLR_PASSWORD'])
+      if os.environ['POSTMARK_TOKEN']:
+          content = content.replace('__POSTMARK_TOKEN__', os.environ['POSTMARK_TOKEN'])
       with open(path, 'w') as f:
           f.write(content)
       PYEOF
+
+      if [ -n "$POSTMARK_TOKEN" ]; then
+        log "Drupal mail goes through Postmark (Libraries Website server)"
+      else
+        log "WARNING: no Postmark token from Key Vault; Drupal cannot send mail"
+      fi
 
       umask 077
       cat > "$SECRETS_ENV" <<EOF

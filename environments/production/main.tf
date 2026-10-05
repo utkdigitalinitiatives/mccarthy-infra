@@ -595,7 +595,11 @@ module "vmss" {
     solr_username             = var.solr_username
     solr_password_secret_name = azurerm_key_vault_secret.solr_drupal_prod_password.name
     anubis_key_secret_name    = azurerm_key_vault_secret.anubis_signing_key.name
-    drupal_search_server_id   = var.drupal_search_server_id
+    # Postmark server "Libraries Website", for Drupal's own mail. Seeded by
+    # hand so the token stays out of TF state. Deploy mail from the workflows
+    # uses a different server ("DevOps", shared-postmark-api-token).
+    postmark_token_secret_name = "production-drupal-postmark-token"
+    drupal_search_server_id    = var.drupal_search_server_id
   })
 
   tags = merge(local.common_tags, {
