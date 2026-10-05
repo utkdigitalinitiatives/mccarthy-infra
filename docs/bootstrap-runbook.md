@@ -353,46 +353,15 @@ az sig image-version list -g lib-main-images-rg --gallery-name lib_main_gallery 
 > matches the Terraform default — but set it explicitly, because it is also what
 > feeds `TF_VAR_postgresql_version` on production applies.
 
-## 10. Re-enable the scheduled workflow
+## 10. No start/stop schedule
 
-`production-schedule.yml` was disabled at repo creation so its cron did not fire
-against resources that did not exist yet. Once production is applied:
+Production runs all the time. Until go-live it was deallocated overnight and at
+weekends by `production-schedule.yml` (enabled 2026-08-03). That workflow was
+disabled and deleted on 2026-10-01, because a public site cannot go dark every
+evening. Do not bring it back for production.
 
-```bash
-gh workflow enable "Production Start/Stop Schedule"
-```
-
-Done 2026-08-03. What it commits you to, since the cron is easy to misread:
-
-| Cron (UTC) | Action | Eastern |
-|---|---|---|
-| `30 11 * * 1-5` | start | 07:30 EDT / 06:30 EST |
-| `30 22 * * 1-5` | stop | 18:30 EDT / 17:30 EST |
-
-**GitHub cron is always UTC, so the local window shifts an hour across DST.** If
-the site must be up by a fixed local time year-round, the cron needs adjusting
-twice a year — nothing here does that automatically.
-
-**Weekdays only.** Production is deallocated from Friday evening until Monday
-morning. That is the intent for a cost-managed environment, but `libtest1` is
-publicly resolvable, so anyone hitting it over a weekend gets nothing. Decide
-deliberately before this fronts anything user-facing.
-
-`ACTION` falls through to `stop` for any trigger that is not the start cron. That
-biases toward not running rather than toward burning money, which is the right
-default — but it does mean editing the start cron string without also editing the
-`ACTION` expression in the job's `env:` silently converts the morning start into a
-second stop.
-
-Every cold start re-runs the cloud-init ceremony — see "Auto-stop wake-up race" in
-the rough-edges table. Harmless at one instance; revisit before scaling out.
-
-Note also that GitHub disables scheduled workflows automatically after 60 days
-with no repository activity, and may delay scheduled runs under load. Neither is
-a correctness problem here, but a missed start is a missed start.
-
-The other four workflows are event-triggered and safe to leave active — nothing
-dispatches to them until the app repo exists.
+Every workflow is now event-triggered or manual, so nothing fires before the app
+repo exists.
 
 ---
 
@@ -416,7 +385,6 @@ Carried forward as warnings because they will bite the same way here.
 |---|---|
 | Stale `image_version` in `terraform.tfvars` | A manual production apply silently reimages to an old build. Always pass `-var="image_version=<currently running>"`. CI is unaffected — it passes an explicit `-var`. |
 | Cross-node DB ceremony | With MaxSurge, two VMSS instances can run `drush updatedb` / `config:import` against the same database concurrently. Fine for additive changes; serialize with `pg_advisory_lock` before the first breaking schema change. |
-| Auto-stop wake-up race | The nightly deallocate means a cold boot re-runs the cloud-init ceremony. Same fix as above. |
 | Media SAS expiry | `media_sas_expiry` is a hard date. Media stops being served when it lapses. Put it on a calendar. |
 | Base image drift | The shared base is rebuilt monthly by lib-main-infra. Set `BASE_IMAGE_VERSION` to pin. |
 | PostgreSQL major changes | Change `PG_MAJOR` and the Terraform default together. It pins both the server and the runner's `pg_dump`; a client older than the server cannot dump it at all. |
