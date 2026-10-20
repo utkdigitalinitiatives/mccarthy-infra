@@ -42,6 +42,16 @@ resource "azurerm_automation_account" "main" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [
+      # OIT governance owns these tags: a CostCenter policy (modify) and Event
+      # Grid auto-tagging on every create/update. Ours still apply on create.
+      tags["CostCenter"],
+      tags["CreatorUPN"], tags["CreatorName"], tags["CreatorObjectID"], tags["CreationTimeStamp"],
+      tags["LastModifierUPN"], tags["LastModifierName"], tags["LastModifierObjectID"], tags["LastModifiedTimeStamp"],
+    ]
+  }
 }
 
 # Grant the automation identity Contributor on the resource group
@@ -73,7 +83,14 @@ resource "azurerm_automation_runbook" "stop_postgresql" {
   # so this suppresses a provider misread, not real drift. Re-test on provider
   # upgrades; drop this once the read is fixed upstream.
   lifecycle {
-    ignore_changes = [runbook_type]
+    ignore_changes = [
+      runbook_type,
+      # OIT governance owns these tags: a CostCenter policy (modify) and Event
+      # Grid auto-tagging on every create/update. Ours still apply on create.
+      tags["CostCenter"],
+      tags["CreatorUPN"], tags["CreatorName"], tags["CreatorObjectID"], tags["CreationTimeStamp"],
+      tags["LastModifierUPN"], tags["LastModifierName"], tags["LastModifierObjectID"], tags["LastModifiedTimeStamp"],
+    ]
   }
 }
 
