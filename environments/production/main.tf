@@ -294,6 +294,16 @@ resource "azurerm_private_dns_zone" "search_internal" {
   name                = "search.utklib.internal"
   resource_group_name = data.azurerm_resource_group.production.name
   tags                = local.common_tags
+
+  lifecycle {
+    ignore_changes = [
+      # OIT governance owns these tags: a CostCenter policy (modify) and Event
+      # Grid auto-tagging on every create/update. Ours still apply on create.
+      tags["CostCenter"],
+      tags["CreatorUPN"], tags["CreatorName"], tags["CreatorObjectID"], tags["CreationTimeStamp"],
+      tags["LastModifierUPN"], tags["LastModifierName"], tags["LastModifierObjectID"], tags["LastModifiedTimeStamp"],
+    ]
+  }
 }
 
 resource "azurerm_private_dns_zone_virtual_network_link" "drupal" {
@@ -303,6 +313,16 @@ resource "azurerm_private_dns_zone_virtual_network_link" "drupal" {
   virtual_network_id    = module.networking.vnet_id
   registration_enabled  = false
   tags                  = local.common_tags
+
+  lifecycle {
+    ignore_changes = [
+      # OIT governance owns these tags: a CostCenter policy (modify) and Event
+      # Grid auto-tagging on every create/update. Ours still apply on create.
+      tags["CostCenter"],
+      tags["CreatorUPN"], tags["CreatorName"], tags["CreatorObjectID"], tags["CreationTimeStamp"],
+      tags["LastModifierUPN"], tags["LastModifierName"], tags["LastModifierObjectID"], tags["LastModifiedTimeStamp"],
+    ]
+  }
 }
 
 resource "azurerm_private_dns_a_record" "solr" {
@@ -311,7 +331,12 @@ resource "azurerm_private_dns_a_record" "solr" {
   resource_group_name = data.azurerm_resource_group.production.name
   ttl                 = 300
   records             = [var.solr_internal_lb_ip]
-  tags                = local.common_tags
+
+  # No OIT tag ignore here, unlike every other tagged resource: a record set
+  # keeps these as DNS metadata, which OIT's tag policy and auto-tagging never
+  # write (2026-10-20: no auto-tags on it, CostCenter not remediated). So ours
+  # stay authoritative.
+  tags = local.common_tags
 }
 
 # Load Balancer: Public Standard LB
@@ -481,6 +506,16 @@ resource "azurerm_storage_account" "private_files" {
   }
 
   tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [
+      # OIT governance owns these tags: a CostCenter policy (modify) and Event
+      # Grid auto-tagging on every create/update. Ours still apply on create.
+      tags["CostCenter"],
+      tags["CreatorUPN"], tags["CreatorName"], tags["CreatorObjectID"], tags["CreationTimeStamp"],
+      tags["LastModifierUPN"], tags["LastModifierName"], tags["LastModifierObjectID"], tags["LastModifiedTimeStamp"],
+    ]
+  }
 }
 
 resource "azurerm_storage_share" "drupal_private" {
