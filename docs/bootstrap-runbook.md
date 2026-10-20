@@ -54,10 +54,10 @@ were visible from reading the code. The fourth succeeded. All three are written
 up in `docs/TODO.md`. Expect the same class of surprise from any step below that
 has never executed.
 
-Each build also leaves an intermediate managed image (`mccarthy-rocky9-<version>`)
-in `lib-main-images-rg`. That is by design — Packer captures to a managed image
-before publishing to the gallery — but they accumulate one per build and nothing
-prunes them.
+Each build also makes an intermediate managed image (`mccarthy-rocky9-<version>`)
+in `lib-main-images-rg`. That is by design — Packer captures to a managed image,
+then `.github/scripts/gallery-publish.sh` publishes it to the gallery — and the
+build workflow deletes it afterwards.
 
 ---
 
