@@ -26,23 +26,6 @@ write_files:
         'prefix' => '',
       ];
 
-      // --- TEMPORARY: D10 news migration source (Pantheon MySQL). Remove after migration. ---
-      // Overrides the placeholder $databases['migrate'] declared in settings.php
-      // (see the app repo issue tracker). Values are substituted at boot by
-      // /opt/fetch-secrets.sh IF the 'migrate-pantheon-db' Key Vault secret exists;
-      // if it doesn't, the __MIGRATE_DB_*__ placeholders remain (inert — the connection
-      // is only ever opened by an explicit `drush migrate:*` run).
-      $databases['migrate']['default'] = [
-        'database'  => '__MIGRATE_DB_NAME__',
-        'username'  => '__MIGRATE_DB_USER__',
-        'password'  => '__MIGRATE_DB_PASS__',
-        'host'      => '__MIGRATE_DB_HOST__',
-        'port'      => '__MIGRATE_DB_PORT__',
-        'driver'    => 'mysql',
-        'namespace' => 'Drupal\\Core\\Database\\Driver\\mysql',
-        'prefix'    => '',
-      ];
-
       // Hash salt for security
       // Substituted at boot by /opt/fetch-secrets.sh (Key Vault).
       $settings['hash_salt'] = '__HASH_SALT__';
@@ -69,7 +52,9 @@ write_files:
       $config['az_blob_fs.settings']['az_blob_account_key_name'] = 'azure_blob_key';
       $config['az_blob_fs.settings']['az_blob_container_name'] = '${storage_container}';
       $config['az_blob_fs.settings']['az_blob_protocol'] = 'https';
+%{ if domain_name != null ~}
       $config['az_blob_fs.settings']['az_blob_cdn_host_name'] = '${domain_name}';
+%{ endif ~}
 
       // The default file scheme is config, not a setting: system.file
       // default_scheme in the app repo's config/system.file.yml. Drupal 8+
@@ -140,6 +125,8 @@ write_files:
       SOLR_PASSWORD_SECRET="${solr_password_secret_name}"
       ANUBIS_KEY_SECRET="${anubis_key_secret_name}"
       POSTMARK_TOKEN_SECRET="${postmark_token_secret_name}"
+      ADMIN_PASSWORD_SECRET="${drupal_admin_password_secret_name}"
+      ADMIN_PASSWORD_FILE="/etc/drupal/admin-password"
       ANUBIS_KEY_FILE="/etc/anubis/drupal.key"
       ENV_PHP="/etc/drupal/environment.php"
       SECRETS_ENV="/etc/drupal/secrets.env"
@@ -177,6 +164,7 @@ write_files:
       SOLR_PASSWORD=""
       ANUBIS_KEY=""
       POSTMARK_TOKEN=""
+      ADMIN_PASSWORD=""
       for attempt in $(seq 1 18); do
         TOKEN=$(get_token || true)
         if [ -n "$TOKEN" ]; then
@@ -195,6 +183,9 @@ write_files:
           # Best-effort: without it Drupal keeps its default mailer and the
           # site still serves; only Drupal's own mail is lost.
           POSTMARK_TOKEN=$(fetch_secret "$POSTMARK_TOKEN_SECRET" "$TOKEN" || true)
+          # Best-effort: /opt/drupal-init.sh needs it only to install into an
+          # empty database, and refuses to install without it.
+          ADMIN_PASSWORD=$(fetch_secret "$ADMIN_PASSWORD_SECRET" "$TOKEN" || true)
           [ -n "$DB_PASSWORD" ] && [ -n "$HASH_SALT" ] && [ -n "$STORAGE_KEY" ] && [ -n "$SOLR_PASSWORD" ] && break
         fi
         log "Secret fetch attempt $attempt incomplete; retrying in 10s..."
@@ -246,37 +237,11 @@ write_files:
         (umask 077 && printf '%s\n' "$ANUBIS_KEY" > "$ANUBIS_KEY_FILE")
       fi
 
-      # --- TEMPORARY: Pantheon migration source creds (OPTIONAL — must never block boot) ---
-      # Only substitutes if the 'migrate-pantheon-db' secret exists in KV. A missing or
-      # failed fetch is NOT an error here. Secret value is JSON:
-      #   {"database":..,"username":..,"password":..,"host":..,"port":..}
-      MIGRATE_TOKEN=$(get_token || true)
-      MIGRATE_JSON=""
-      if [ -n "$MIGRATE_TOKEN" ]; then
-        MIGRATE_JSON=$(fetch_secret "migrate-pantheon-db" "$MIGRATE_TOKEN" || true)
-      fi
-      if [ -n "$MIGRATE_JSON" ]; then
-        # Wrapped in if/then so a malformed secret logs a warning instead of
-        # aborting the VMSS boot under `set -e` (prod boot must never be blocked
-        # by this optional migration wiring).
-        if MIGRATE_JSON="$MIGRATE_JSON" python3 - "$ENV_PHP" 2>/dev/null <<'PYEOF'
-      import os, sys, json
-      path = sys.argv[1]
-      creds = json.loads(os.environ['MIGRATE_JSON'])
-      with open(path) as f:
-          content = f.read()
-      for token, field in [('NAME', 'database'), ('USER', 'username'), ('PASS', 'password'), ('HOST', 'host'), ('PORT', 'port')]:
-          content = content.replace('__MIGRATE_DB_' + token + '__', str(creds[field]))
-      with open(path, 'w') as f:
-          f.write(content)
-      PYEOF
-        then
-          log "Migrate (Pantheon) source DB credentials injected"
-        else
-          log "WARNING: migrate-pantheon-db present but could not be applied (malformed JSON?); continuing boot"
-        fi
-      else
-        log "No migrate-pantheon-db secret; migration source not configured (normal outside migration)"
+      # Drupal admin password, root-only, for the same reason. Read only by the
+      # install branch of /opt/drupal-init.sh.
+      rm -f "$ADMIN_PASSWORD_FILE"
+      if [ -n "$ADMIN_PASSWORD" ]; then
+        (umask 077 && printf '%s' "$ADMIN_PASSWORD" > "$ADMIN_PASSWORD_FILE")
       fi
 
       log "Secrets bootstrap complete"
@@ -287,7 +252,9 @@ write_files:
     owner: root:root
     content: |
       #!/bin/bash
-      set -e
+      # pipefail: drush output goes through tee, which would otherwise hide a
+      # failed drush from set -e.
+      set -eo pipefail
 
       # Sourced from /opt/fetch-secrets.sh (Key Vault MI).
       # shellcheck disable=SC1091
@@ -323,7 +290,9 @@ write_files:
       # Output goes to $LOG_FILE without tee: tee would mask exit codes from set -e.
       enable_blob_modules() {
         [ -d "$DRUPAL_ROOT/web/modules/contrib/az_blob_fs" ] || return 0
-        if sudo -u drupal $DRUSH pm:list --status=enabled --field=name 2>/dev/null | grep -qx az_blob_fs; then
+        # grep without -q: under pipefail, -q exits at the first match and
+        # drush dies of SIGPIPE, which reads as "not enabled".
+        if sudo -u drupal $DRUSH pm:list --status=enabled --field=name 2>/dev/null | grep -x az_blob_fs >/dev/null; then
           return 0
         fi
         log "Pre-installing key + az_blob_fs (config:import cannot install a stream-wrapper module)..."
@@ -338,11 +307,30 @@ write_files:
         sudo -u drupal $DRUSH en az_blob_fs -y >>"$LOG_FILE" 2>&1
       }
 
-      # Check if Drupal is already installed
+      # Install or update? Ask the database, not Drupal. `drush status` says
+      # "Successful" only after a full bootstrap, so a production DB that Drupal
+      # could not boot (a stale cached container, a half-finished import) used
+      # to fall through to site:install, which drops every table first.
+      # sql:query needs only the configuration bootstrap. pg_tables lists every
+      # table, whatever this user's grants. If the count cannot be read, stop:
+      # neither branch is safe to guess.
       cd "$DRUPAL_ROOT"
-      if sudo -u drupal $DRUSH status --field=bootstrap 2>/dev/null | grep -q "Successful"; then
-        log "Drupal already installed, running updates..."
-        sudo -u drupal $DRUSH updatedb -y 2>&1 | tee -a "$LOG_FILE" || true
+      if ! TABLES=$(sudo -u drupal $DRUSH sql:query "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname = 'public'" 2>>"$LOG_FILE"); then
+        log "ERROR: cannot query the database; refusing to install or update"
+        exit 1
+      fi
+      TABLES=$(echo "$TABLES" | tr -d '[:space:]')
+      if ! [[ "$TABLES" =~ ^[0-9]+$ ]]; then
+        log "ERROR: unexpected table count '$TABLES'; refusing to install or update"
+        exit 1
+      fi
+
+      if [ "$TABLES" -gt 0 ]; then
+        log "Database has $TABLES tables; Drupal already installed, running updates..."
+        if ! sudo -u drupal $DRUSH updatedb -y 2>&1 | tee -a "$LOG_FILE"; then
+          log "ERROR: updatedb failed"
+          exit 1
+        fi
 
         # Clean up orphaned s3fs module references (s3fs → az_blob_fs migration).
         # If the DB was synced from an environment where s3fs was still enabled,
@@ -375,10 +363,8 @@ write_files:
           log "Config sync directory has config, importing..."
           # A failed import leaves active config partial and the site broken, so it
           # must abort loudly. drush exits 0 on "no changes", so the old "may be no
-          # changes" rationale for continuing was false. tee returns 0 regardless of
-          # drush's fate; read the real status from PIPESTATUS.
-          sudo -u drupal $DRUSH config:import -y 2>&1 | tee -a "$LOG_FILE"
-          if [ "$${PIPESTATUS[0]}" -ne 0 ]; then
+          # changes" rationale for continuing was false.
+          if ! sudo -u drupal $DRUSH config:import -y 2>&1 | tee -a "$LOG_FILE"; then
             log "ERROR: config:import failed; active config may be partial"
             exit 1
           fi
@@ -389,12 +375,18 @@ write_files:
         sudo -u drupal $DRUSH cache:rebuild 2>&1 | tee -a "$LOG_FILE" || true
         log "Updates complete"
       else
-        log "Installing Drupal..."
+        # From /opt/fetch-secrets.sh (Key Vault), so it stays out of custom_data.
+        ADMIN_PASSWORD_FILE="/etc/drupal/admin-password"
+        if [ ! -s "$ADMIN_PASSWORD_FILE" ]; then
+          log "ERROR: the database is empty but Key Vault gave no admin password; refusing to install"
+          exit 1
+        fi
+        log "Database has no tables; installing Drupal..."
         sudo -u drupal $DRUSH site:install "${install_profile}" \
           --db-url="pgsql://${db_user}:$DB_PASSWORD@${db_host}:5432/${db_name}" \
           --site-name="${site_name}" \
           --account-name=admin \
-          --account-pass="${drupal_admin_password}" \
+          --account-pass="$(cat "$ADMIN_PASSWORD_FILE")" \
           --account-mail="admin@example.com" \
           -y 2>&1 | tee -a "$LOG_FILE"
 
@@ -797,8 +789,8 @@ write_files:
 
           Header always set X-Frame-Options "SAMEORIGIN"
           Header always set X-Content-Type-Options "nosniff"
-          Header always set X-XSS-Protection "1; mode=block"
-          Header always set Strict-Transport-Security "max-age=300"
+          # Ramping up: 300 through go-live, one day now, a year next.
+          Header always set Strict-Transport-Security "max-age=86400"
 
           ErrorLog /var/log/httpd/drupal-ssl-error.log
           CustomLog /var/log/httpd/drupal-ssl-access.log combined
@@ -834,9 +826,9 @@ write_files:
           # Certbot issued the cert — use certbot renewal
           cat > /etc/letsencrypt/renewal-hooks/deploy/01-update-and-upload.sh <<'RENEWEOF'
       #!/bin/bash
-      DOMAIN="$RENEWED_DOMAINS"
-      cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" /etc/pki/tls/certs/letsencrypt-fullchain.pem
-      cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" /etc/pki/tls/private/letsencrypt-privkey.pem
+      # RENEWED_LINEAGE is the live/ directory; RENEWED_DOMAINS is a list.
+      cp "$RENEWED_LINEAGE/fullchain.pem" /etc/pki/tls/certs/letsencrypt-fullchain.pem
+      cp "$RENEWED_LINEAGE/privkey.pem" /etc/pki/tls/private/letsencrypt-privkey.pem
       chmod 644 /etc/pki/tls/certs/letsencrypt-fullchain.pem
       chmod 600 /etc/pki/tls/private/letsencrypt-privkey.pem
       systemctl restart httpd
@@ -868,11 +860,13 @@ write_files:
           systemctl start certbot-renew.timer
           log "Certbot renewal timer enabled"
         else
-          # Cert came from blob — set up daily cron to check expiry and re-fetch
+          # Cert came from blob — set up daily cron to check expiry and re-fetch.
+          # tls-setup.sh only writes the new cert; Apache keeps serving the old
+          # one until it reloads.
           cat > /etc/cron.daily/tls-check <<CRONEOF
       #!/bin/bash
       if ! openssl x509 -checkend 604800 -noout -in /etc/pki/tls/certs/letsencrypt-fullchain.pem 2>/dev/null; then
-        /opt/tls-setup.sh
+        /opt/tls-setup.sh && systemctl reload httpd
       fi
       CRONEOF
           chmod 750 /etc/cron.daily/tls-check
